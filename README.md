@@ -22,24 +22,24 @@
 
 ## run scl routine
 
-1. edit scl address and controller address in const.py
+edit scl address and controller address in const.py
 
-2. run sw_sc.py and ctrl_scl.py
+run sw_sc.py and ctrl_scl.py
 
 ``` Bash
 ./sw_scl.py     # on switch side
 ./ctrl_scl.py   # on controller side
 ```
 
-3. run a controller function, pox as an example
+run a controller function, pox as an example
 
 ``` Bash
 ./pox.py log.level --DEBUG forwarding.l2_learning
 ```
 
-4. set up a network, mininet as an example
+set up a network, mininet as an example
 ``` Bash
 mn --switch ovsk --mac --controller remote,ip=127.0.0.1,port=6633
 ```
 
-5. ctrl_scl will show the link state.
+ctrl_scl will show the link state.
