@@ -2,6 +2,7 @@
 
 import Queue
 import select
+import logging
 from lib.const import *
 from lib.socket_utils import *
 import lib.sclprotocol as scl
@@ -19,6 +20,12 @@ tcp_serv.open()
 inputs = [udp_conn.sock, tcp_serv.sock]
 outputs = [udp_conn.sock]
 
+LOG_FILENAME = None
+LEVEL = logging.INFO    # DEBUG shows the whole states
+logging.basicConfig(
+    format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt = '%Y%m%d %H:%M:%S', level = LEVEL, filename = LOG_FILENAME)
+
 
 def adjust_outputs(outputs, udp_conn, tcp_client, upstream, downstream):
     '''
@@ -29,7 +36,7 @@ def adjust_outputs(outputs, udp_conn, tcp_client, upstream, downstream):
     if upstream.empty() and udp_conn.sock in outputs:
         outputs.remove(udp_conn.sock)
     elif not upstream.empty() and udp_conn.sock not in outputs:
-        outputs.append(udp_conn.sock) 
+        outputs.append(udp_conn.sock)
     if tcp_client:
         if downstream.empty() and tcp_client in outputs:
             outputs.remove(tcp_client)
@@ -54,8 +61,8 @@ def main():
 
         for r in rlist:
             if r is udp_conn.sock:
-                # udp_conn recv
-                data = r.recv(RECV_BUF_SIZE)
+                data, addr = r.recvfrom(RECV_BUF_SIZE)
+                logging.debug('receive msg from ctrl_scl %s', addr[0])
                 if data:
                     type, seq, data = scl.parseheader(data)
                     if type is scl.SCLT_OF and seq > last_seq:
@@ -63,36 +70,41 @@ def main():
                         downstream.put(data)
 
             elif r is tcp_serv.sock:
-                print 'new connection'
+                logging.info('new connection from the switch')
                 tcp_client, addr = r.accept()   # need to set non-blocking ?
                 inputs.append(tcp_client)
                 outputs.append(tcp_client)
-                # send connection up msg to controller
+                logging.debug(
+                    'send SCLT_HELLO msg to ctrl_scl to '
+                    'set up connection between ctrl_scl and controller')
                 upstream.put(scl.addheader('', scl.SCLT_HELLO))
 
             elif r is tcp_client:
-                # tcp_client recv
+                logging.debug('receive msg from switch')
                 try:
                     data = r.recv(RECV_BUF_SIZE)
                     if data:
-                        # tcp conn recv, add scl header, put data into upstreams
+                        # add scl header, put data into upstreams
                         upstream.put(scl.addheader(data, scl.SCLT_OF))
                     else:
-                        print 'tcp_close normally'
+                        logging.info(
+                            'connection to switch closed by the switch')
                         tcp_client, last_seq = tcp_close(
                             r, inputs, outputs, upstream)
                 except socket.error, e:
-                    # TODO: log next
-                    print 'tcp_close abnormally', e
+                    logging.error(
+                        'connection to switch closed abnormally, error %s' % e)
                     tcp_client, last_seq = tcp_close(
                         r, inputs, outputs, upstream)
 
         for w in wlist:
             if w is udp_conn.sock:
+                logging.debug('broadcast msg to ctrl_scl')
                 next_msg = upstream.get_nowait()
                 w.sendto(next_msg, udp_conn.dst_addr)
 
             elif w is tcp_client:
+                logging.debug('send msg to switch')
                 next_msg = downstream.get_nowait()
                 w.send(next_msg)
 

@@ -8,6 +8,9 @@ def ip2int(addr):
 def int2ip(addr):
     return socket.inet_ntoa(struct.pack("!I", addr))
 
+def id2str(conn_id):
+    return int2ip(conn_id >> 16) + ':' + str(conn_id % (1 << 16))
+
 class UdpConn(object):
     '''
     For scl on the switch side, connect to scl on the controller side
@@ -56,7 +59,7 @@ class UdpMcastListener(object):
 
     def recvfrom(self, buf_size):
         data, addr = self.sock.recvfrom(buf_size) # addr = ('ip', port)
-        addr_id = ip2int(addr[0])
+        addr_id = (ip2int(addr[0]) << 16) + addr[1]
         self.dst_addr[addr_id] = addr
         return data, addr_id
 
