@@ -2,31 +2,8 @@ import Queue
 import errno
 import select
 from const import RECV_BUF_SIZE
-import scl_protocol as scl
 from socket_utils import *
-
-
-class Selector(object):
-    '''
-    High-level wrapper around the 'select' system call
-    '''
-    def __init__(self):
-        self.__reset()
-
-    def wait(self, inputs, outputs):
-        for i in inputs:
-            self.inputs.append(i)
-        for o in outputs:
-            self.outputs.append(o)
-
-    def block(self):
-        lists = select.select(self.inputs, self.outputs, [])
-        self.__reset()
-        return lists
-
-    def __reset(self):
-        self.inputs = []
-        self.outputs = []
+import scl_protocol as scl
 
 
 class Streams(object):
@@ -172,11 +149,12 @@ class Scl2Scl(object):
     '''
     def __init__(
             self, ctrl_scl_mcast_grp, ctrl_scl_mcast_port,
-            ctrl_scl_intf, scl2ctrl, streams, logger):
+            ctrl_scl_intf, scl2ctrl, timer, streams, logger):
         self.udp_mcast = UdpMcastListener(
                 ctrl_scl_mcast_grp, ctrl_scl_mcast_port, ctrl_scl_intf)
         self.udp_mcast.open()
         self.scl2ctrl = scl2ctrl
+        self.timer = timer
         self.streams = streams
         self.logger = logger
 
@@ -229,6 +207,10 @@ class Scl2Scl(object):
                 link_state.unpack(data)
                 self.streams.linkstreams[conn_id].put(
                         [link_state.port, link_state.state])
+                self.logger.info(
+                        '%s, %s' % (
+                        link_state.port,
+                        'up' if link_state.state == 0 else 'down'))
 
     def process_data(self, conn_id, type, seq, data):
         '''
@@ -267,3 +249,15 @@ class Scl2Scl(object):
             if data:
                 type, seq, data = scl.parseheader(data)
                 self.process_data(conn_id, type, seq, data)
+
+        # check timer
+        # (count + 1) % 3 per second
+        # send link state request each three seconds
+        if self.timer.time_up and self.timer.count == 1:
+            self.logger.debug('periodically send rqst msg')
+            for conn_id in self.streams.downstreams:
+                self.logger.debug(
+                        'send link state request msg to sw_scl '
+                        '%s' % id2str(conn_id))
+                self.udp_mcast.sendto(
+                        scl.addheader('', scl.SCLT_LINK_RQST), conn_id)

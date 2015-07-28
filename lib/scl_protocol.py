@@ -42,6 +42,7 @@ class scl_link_state(object):
 
     def pack(self, port, state):
         msg = ''
+        port = str(port)
         if len(port) > OFP_MAX_PORT_NAME_LEN:
             # TODO: raise
             msg = port[0: OFP_MAX_PORT_NAME_LEN]

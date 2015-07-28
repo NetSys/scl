@@ -2,27 +2,33 @@
 
 import logging
 from lib.const import *
+from lib.selector import Selector
+from lib.timer import Timer
 import lib.scl_channel as scl
 
 
 LOG_FILENAME = None
-LEVEL = logging.DEBUG    # DEBUG shows the whole states
+LEVEL = logging.INFO    # DEBUG shows the whole states
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     datefmt='%Y%m%d %H:%M:%S', level=LEVEL, filename=LOG_FILENAME)
 logger = logging.getLogger(__name__)
 
+timer = Timer(logger)
 streams = scl.Streams()
 scl2ctrl = scl.Scl2Ctrl(ctrl_host, ctrl_port, streams, logger)
 scl2scl = scl.Scl2Scl(
         ctrl_scl_mcast_grp, ctrl_scl_mcast_port,
-        ctrl_scl_intf, scl2ctrl, streams, logger)
+        ctrl_scl_intf, scl2ctrl, timer, streams, logger)
+selector = Selector()
 
-selector = scl.Selector()
+timer.start()   # another thread, daemonize
 
 while True:
+    timer.wait(selector)
     scl2ctrl.wait(selector)
     scl2scl.wait(selector)
     lists = selector.block()
+    timer.run(lists)
     scl2ctrl.run(lists)
     scl2scl.run(lists)

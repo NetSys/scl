@@ -4,10 +4,11 @@ import Queue
 import select
 import socket
 import logging
-import json
 from lib.const import *
 from lib.socket_utils import *
+from lib.ovsdb_utils import OvsdbConn
 from lib.libopenflow_01 import ofp_port_status
+from lib.libopenflow_01 import ofp_features_reply
 import lib.scl_protocol as scl
 
 
@@ -20,15 +21,13 @@ udp_conn.open()
 tcp_serv = TcpListen(sw_scl_serv_host, sw_scl_serv_port)
 tcp_serv.open()
 
-ovsdb_conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-ovsdb_conn.connect(OVSDB)   # check the OVSDB path
-db_link_state_query = {"method": "", "params": [], "id": 0}
+ovsdb_conn = OvsdbConn(OVSDB) # check the OVSDB path
 
 inputs = [udp_conn.sock, tcp_serv.sock]
 outputs = [udp_conn.sock]
 
 LOG_FILENAME = None
-LEVEL = logging.DEBUG    # DEBUG shows the whole states
+LEVEL = logging.INFO    # DEBUG shows the whole states
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     datefmt='%Y%m%d %H:%M:%S', level=LEVEL, filename=LOG_FILENAME)
@@ -69,14 +68,22 @@ def handle_of_msg(upstream, data):
         if data_length - offset < msg_length:
             break
 
+        # OFPT_PORT_STATUS
         if of_type == 12:
             port_status = ofp_port_status()
             port_status.unpack(data[offset: offset + msg_length])
             logger.info(
-                '%s %d' % (port_status.desc.name, port_status.desc.state))
+                'openflow msg %s %d' % (
+                    port_status.desc.name, port_status.desc.state))
             link_state = scl.scl_link_state()
             msg = link_state.pack(port_status.desc.name, port_status.desc.state)
             upstream.put(scl.addheader(msg, scl.SCLT_LINK_RPLY))
+        # OFPT_FEATURES_REPLY
+        elif of_type == 6:
+            features_reply = ofp_features_reply()
+            features_reply.unpack(data[offset: offset + msg_length])
+            ovsdb_conn.datapath_id =\
+                    hex(features_reply.datapath_id)[2:].zfill(16)
 
         offset = offset + msg_length
 
@@ -112,11 +119,11 @@ def main():
                         last_link_seq = seq
                         # blocking
                         # TODO: non-blocking
-                        ovsdb_conn.send(json.dumps(db_link_state_query))
-                        response = ovsdb_conn.recv(RECV_BUF_SIZE)
-                        link_state = scl_link_state()
-                        msg = link_state.pack(response.port, response.state)
-                        upstream.put(scl.addheader(msg, scl.SCLT_LINK_RPLY))
+                        link_states = ovsdb_conn.query()
+                        for port in link_states:
+                            link_state = scl.scl_link_state()
+                            msg = link_state.pack(port, link_states[port])
+                            upstream.put(scl.addheader(msg, scl.SCLT_LINK_RPLY))
 
             elif r is tcp_serv.sock:
                 logger.info('new connection from the switch')
