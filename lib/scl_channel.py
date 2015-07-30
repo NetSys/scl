@@ -1,6 +1,5 @@
 import Queue
 import errno
-import select
 from const import RECV_BUF_SIZE
 from socket_utils import *
 import scl_protocol as scl
@@ -13,15 +12,30 @@ class Streams(object):
     def __init__(self):
         self.upstreams = {}         # conn_id: data_to_be_sent_to_controller
         self.downstreams = {}       # conn_id: data_to_be_sent_to_sw_scl
-        self.linkstreams = {}       # conn_id: link_state
         self.last_of_seqs = {}      # conn_id: last_connection_sequence_num
-        self.last_link_seqs = {}    # conn_id: last_link_sequence_num
+        # link_log type {conn_id: [max_version, {'link_1': [version, state]}]}
+        self.link_log = {}
 
     def downstreams_empty(self):
         for k in self.downstreams:
             if not self.downstreams[k].empty():
                 return False
         return True
+
+    def open(self, conn_id, of_seq):
+        conn_id_str = str(conn_id)              # same with json str
+        self.upstreams[conn_id] = Queue.Queue()
+        self.downstreams[conn_id] = Queue.Queue()
+        self.link_log[conn_id_str] = []
+        self.link_log[conn_id_str].append(-1)   # max_version
+        self.link_log[conn_id_str].append({})
+        self.last_of_seqs[conn_id] = of_seq
+
+    def delete(self, conn_id):
+        del self.upstreams[conn_id]
+        del self.downstreams[conn_id]
+        del self.link_log[str(conn_id)]
+        del self.last_of_seqs[conn_id]
 
 
 class Scl2Ctrl(object):
@@ -41,11 +55,7 @@ class Scl2Ctrl(object):
         sock = self.tcp_conns.id2conn[conn_id].sock
         # add connecting socket to checking list (outputs)
         self.outputs.append(sock)
-        self.streams.upstreams[conn_id] = Queue.Queue()
-        self.streams.downstreams[conn_id] = Queue.Queue()
-        self.streams.linkstreams[conn_id] = Queue.Queue()
-        self.streams.last_of_seqs[conn_id] = seq
-        self.streams.last_link_seqs[conn_id] = -1
+        self.streams.open(conn_id, seq)
         if ret:
             self.logger.info(
                 'connection to controller successful, conn_id: %d', conn_id)
@@ -53,7 +63,6 @@ class Scl2Ctrl(object):
         elif err.errno is not errno.EINPROGRESS:
             self.logger.error(
                 'connecting to controller fails, errno %d' % err.errno)
-
 
     def adjust_outputs(self):
         '''
@@ -79,11 +88,7 @@ class Scl2Ctrl(object):
             self.outputs.remove(sock)
         if sock in self.inputs:
             self.inputs.remove(sock)
-        del self.streams.upstreams[conn_id]
-        del self.streams.downstreams[conn_id]
-        del self.streams.linkstreams[conn_id]
-        del self.streams.last_of_seqs[conn_id]
-        del self.streams.last_link_seqs[conn_id]
+        self.streams.delete(conn_id)
         self.tcp_conns.close(conn_id)
 
     def close_connection(self, conn_id):
@@ -102,6 +107,7 @@ class Scl2Ctrl(object):
         selector.wait(self.inputs, self.outputs)
 
     def run(self, lists):
+        # FIXME: run pox after scl, err: dict changed size during iteration
         for s in self.tcp_conns.sock2conn:
             # socket is writeable
             if s in lists[1]:
@@ -193,24 +199,25 @@ class Scl2Scl(object):
 
     def handle_link_rply_msg(self, conn_id, seq, data):
         # TODO: simplify code
-        if conn_id not in self.streams.last_link_seqs:
+        conn_id_str = str(conn_id)  # same with json str
+        if conn_id_str not in self.streams.link_log:
             self.logger.warn(
                 'receive wrong type msg (except SCLT_HELLO)')
         else:
-            if self.streams.last_link_seqs[conn_id] >= seq:
+            link_state = scl.scl_link_state()
+            link_state.unpack(data)
+            if link_state.port in self.streams.link_log[conn_id_str][1]\
+                    and self.streams.link_log[conn_id_str][1][link_state.port][0] >= seq:
                 self.logger.warn('receive disordered link msg from sw_scl')
             else:
-                self.streams.last_link_seqs[conn_id] = seq
-                self.logger.debug('receive SCLT_LINK_RPLY')
-                self.streams.linkstreams[conn_id].put(data)
-                link_state = scl.scl_link_state()
-                link_state.unpack(data)
-                self.streams.linkstreams[conn_id].put(
-                        [link_state.port, link_state.state])
+                self.streams.link_log[conn_id_str][1][link_state.port] =\
+                        [seq, link_state.state]
+                if seq > self.streams.link_log[conn_id_str][0]:
+                    self.streams.link_log[conn_id_str][0] = seq
                 self.logger.info(
-                        '%s, %s' % (
-                        link_state.port,
-                        'up' if link_state.state == 0 else 'down'))
+                        '%s, %s, %s; ver: %d' % (
+                            id2str(conn_id), link_state.port,
+                            'up' if link_state.state == 0 else 'down', seq))
 
     def process_data(self, conn_id, type, seq, data):
         '''

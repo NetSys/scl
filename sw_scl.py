@@ -21,7 +21,7 @@ udp_conn.open()
 tcp_serv = TcpListen(sw_scl_serv_host, sw_scl_serv_port)
 tcp_serv.open()
 
-ovsdb_conn = OvsdbConn(OVSDB) # check the OVSDB path
+ovsdb_conn = OvsdbConn(OVSDB)   # check the OVSDB path
 
 inputs = [udp_conn.sock, tcp_serv.sock]
 outputs = [udp_conn.sock]
@@ -64,7 +64,7 @@ def handle_of_msg(upstream, data):
     while data_length - offset >= 8:
         of_type = ord(data[offset + 1])
         msg_length = ord(data[offset + 2]) << 8 | ord(data[offset + 3])
-        logger.debug('msg_length: %d' % msg_length)
+        logger.debug('of_type: %d, msg_length: %d' % (of_type, msg_length))
         if data_length - offset < msg_length:
             break
 
@@ -83,7 +83,7 @@ def handle_of_msg(upstream, data):
             features_reply = ofp_features_reply()
             features_reply.unpack(data[offset: offset + msg_length])
             ovsdb_conn.datapath_id =\
-                    hex(features_reply.datapath_id)[2:].zfill(16)
+                hex(features_reply.datapath_id)[2:].zfill(16)
 
         offset = offset + msg_length
 

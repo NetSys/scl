@@ -15,3 +15,9 @@ RECV_BUF_SIZE = 2048
 
 # ovsdb unix path
 OVSDB = '/var/run/openvswitch/db.sock'
+
+# gossip protocol peer lists
+peer_lists = [
+        ('192.168.1.1', 6655),
+        ('192.168.1.10', 6655)]
+host_id = 0

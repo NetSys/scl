@@ -55,6 +55,8 @@ class scl_link_state(object):
     def unpack(self, msg):
         for i in range(0, OFP_MAX_PORT_NAME_LEN):
             self.port =  self.port + msg[i]
+        port = self.port.split(b"\x00")
+        self.port = port[len(port) - 1]
         offset = OFP_MAX_PORT_NAME_LEN
         self.state = ord(msg[offset]) << 24 | ord(msg[offset+1]) << 16 |\
                      ord(msg[offset+2]) << 8 | ord(msg[offset+3])
