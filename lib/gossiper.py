@@ -18,6 +18,99 @@ def byteify(input):
         return input
 
 
+class LinkLog(object):
+    def __init__(self, host_id, peer_lists):
+        self.log = {}
+        self.peer_num = len(peer_lists) - 1     # not self
+
+    def update(self, switch, link, event, state, peer=None):
+        if switch not in self.log:
+            self.log[switch] = {}
+        if link not in self.log[switch]:
+            self.log[switch][link] = {}
+        if event not in self.log[switch][link]:
+            self.log[switch][link][event] = {}
+            self.log[switch][link][event]['state'] = state
+        if peer is not None:
+            self.log[switch][link][event]['peers'].append(peer)
+
+    def digest(self):
+        '''
+        calculate summary of log to be sent
+        '''
+        digest = {}
+        for switch in self.log:
+            digest[switch] = {}
+            for link in self.log[switch]:
+                digest[switch][link] = []
+                last_event = None
+                events = sorted(self.log[switch][link].keys())
+                for e in events:
+                    if last_event is None:
+                        digest[switch][link].append(e)
+                    elif e - last_event > 1:
+                        digest[switch][link].append((last_event, e))
+                    elif e == events[-1]:
+                        digest[switch][link].append(e)
+                    last_event = e
+        return digest
+
+    def subtract_events(self, switch, link, events):
+        ret = []
+        self_events = sorted(self.log[switch][link].keys())
+        # TODO: refine code
+        for e in events:
+            if e is events[0]:
+                for self_e in self_events:
+                    if e > self_e:
+                        ret.append((
+                            self_e, self.log[switch][link][self_e]['state']))
+            if e is events[-1]:
+                for self_e in self_events:
+                    if e < self_e:
+                        ret.append((
+                            self_e, self.log[switch][link][self_e]['state']))
+            if e is not events[0] and e is not events[-1]:
+                for self_e in self_events:
+                    if e[0] < self_e and e[1] > self_e:
+                        ret.append((
+                            self_e, self.log[switch][link][self_e]['state']))
+        return ret
+
+    def subtract_log(self, digest):
+        delta = {}
+        for switch in self.log:
+            if switch not in digest:
+                delta[switch] = self.log[switch]
+            else:
+                delta[switch] = {}
+                for link in self.log[switch]:
+                    if link not in digest[switch]:
+                        delta[switch][link] = self.log[switch][link]
+                    else:
+                        delta[switch][link] = self.subtract_events(
+                                switch, link, digest[switch][link])
+                        if not delta[switch][link]:
+                            del delta[switch][link]
+                if not delta[switch]:
+                    del delta[switch]
+        return delta
+
+    def truncate(self):
+        '''
+        truncate tail, if all messages have beed seen by each others
+        '''
+        # TODO: how can host know that others have received its message?
+        for switch in self.log:
+            for link in self.log[switch]:
+                events = sorted(self.log[switch][link].keys())
+                for e in events:
+                    if len(self.log[switch][link][e]['peers']) is self.peer_num:
+                        del self.log[switch][link][e]   # or write it to disk
+                    else:
+                        break
+
+
 class Gossiper(object):
     def __init__(self, host_id, peer_lists, timer, streams, logger):
         self._open(host_id, peer_lists)
@@ -34,107 +127,40 @@ class Gossiper(object):
         del peer_lists[host_id]
         self.peer_lists = peer_lists
 
-    def _digest(self):
-        digest = {}
-        for sw in self.link_log:
-            digest[sw] = self.link_log[sw][0]
-        return digest
-
     def _handle_msg(self, data, addr):
         '''
-        |--- syn-->|
-        |          |
-        |<-- ack---|
-        |          |
-        |---ack2-->|
+                 **pull method**
+        |---       syn, digest        -->|
+        |                                |
+        |<-- ack, response of missing ---|
         '''
         if data['type'] == 'syn':
             self._handle_syn(data, addr)
         elif data['type'] == 'ack':
             self._handle_ack(data, addr)
-        elif data['type'] == 'ack2':
-            self._handle_ack2(data, addr)
 
     def _handle_syn(self, data, addr):
         self.logger.debug(
                 "receive syn from %s, digest: %s" % (
                     addr[0], json.dumps(data['digest'])))
-        ack_msg = {}
-        for sw in data['digest']:
-            if sw not in self.link_log:
-                ack_msg[sw] = ['request', -1]
-            else:
-                if data['digest'][sw] > self.link_log[sw][0]:
-                    ack_msg[sw] = ['request', self.link_log[sw][0]]
-                elif data['digest'][sw] < self.link_log[sw][0]:
-                    ack_msg[sw] = ['response', self.link_log[sw][0], {}]
-                    for link in self.link_log[sw][1]:
-                        if self.link_log[sw][1][link][0] > data['digest'][sw]:
-                            ack_msg[sw][2][link] = [
-                                    self.link_log[sw][1][link][0],
-                                    self.link_log[sw][1][link][1]]
-        for sw in self.link_log:
-            if sw not in data['digest']:
-                ack_msg[sw] = [
-                        'response', self.link_log[sw][0], self.link_log[sw][1]]
 
-        if ack_msg:
+        delta = self.link_log.subtract_log(data['digest'])
+
+        if delta:
             self.logger.debug(
                     "send ack to %s, delta: %s" % (
-                        addr[0], json.dumps(ack_msg)))
+                        addr[0], json.dumps(delta)))
             self.sock.sendto(json.dumps(
-                {'type': 'ack', 'delta': ack_msg}), addr)
+                {'type': 'ack', 'delta': delta}), addr)
 
     def _handle_ack(self, data, addr):
         self.logger.debug(
                 "receive ack from %s, delta: %s" % (
                     addr[0], json.dumps(data['delta'])))
-        ack2_msg = {}
-        for sw in data['delta']:
-            if sw not in self.link_log:
-                if data['delta'][sw][0] == 'response':
-                    self.link_log[sw] = [data['delta'][sw][1], data['delta'][sw][2]]
-                else:
-                    self.logger.warn('ack except response for unknown sw %s' % sw)
-
-            elif data['delta'][sw][0] == 'response':
-                for link in data['delta'][sw][2]:
-                    if link not in self.link_log[sw][1] or\
-                            self.link_log[sw][1][link][0] <\
-                            data['delta'][sw][2][link][0]:
-                        self.link_log[sw][1][link] = data['delta'][sw][2][link]
-                if self.link_log[sw][0] < data['delta'][sw][1]:
-                    self.link_log[sw][0] = data['delta'][sw][1]
-
-            elif data['delta'][sw][0] == 'request':
-                ack2_msg[sw] = ['response', self.link_log[sw][0], {}]
-                for link in self.link_log[sw][1]:
-                    if self.link_log[sw][1][link][0] > data['delta'][sw][1]:
-                        ack2_msg[sw][2][link] = [
-                                self.link_log[sw][1][link][0],
-                                self.link_log[sw][1][link][1]]
-
-        if ack2_msg:
-            self.logger.debug(
-                    "send ack2 to %s, delta: %s" % (
-                        addr[0], json.dumps(ack2_msg)))
-            self.sock.sendto(json.dumps(
-                {'type': 'ack2', 'delta': ack2_msg}), addr)
-
-    def _handle_ack2(self, data, addr):
-        self.logger.debug(
-                "receive ack2 from %s, delta: %s" % (
-                    addr[0], json.dumps(data['delta'])))
-        for sw in data['delta']:
-            if sw in self.link_log and data['delta'][sw][0] == 'response':
-                for link in data['delta'][sw][2]:
-                    if link not in self.link_log[sw][1] or\
-                            self.link_log[sw][1][link][0] <\
-                            data['delta'][sw][2][link][0]:
-                        self.link_log[sw][1][link] = data['delta'][sw][2][link]
-
-                if self.link_log[sw][0] < data['delta'][sw][1]:
-                    self.link_log[sw][0] = data['delta'][sw][1]
+        for switch in data['delta']:
+            for link in data['delta'][switch]:
+                for event, state in data['delta'][switch][link].iteritems():
+                    self.link_log.update(switch, link, event, state, addr)
 
     def wait(self, selector):
         selector.wait([self.sock], [])
@@ -151,7 +177,7 @@ class Gossiper(object):
             addr = random.choice(self.peer_lists)
             self.logger.debug(
                     "send syn to %s, digest: %s" % (
-                        addr[0], json.dumps(self._digest())))
+                        addr[0], json.dumps(self.link_log.digest())))
             self.sock.sendto(json.dumps({
-                'type': 'syn', 'digest': self._digest()
+                'type': 'syn', 'digest': self.link_log.digest()
                 }), addr)

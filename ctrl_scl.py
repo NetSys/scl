@@ -16,7 +16,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 timer = Timer(logger)
-streams = scl.Streams()
+streams = scl.Streams(host_id, peer_lists)
 scl2ctrl = scl.Scl2Ctrl(ctrl_host, ctrl_port, streams, logger)
 scl2scl = scl.Scl2Scl(
         ctrl_scl_mcast_grp, ctrl_scl_mcast_port,
