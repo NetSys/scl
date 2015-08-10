@@ -3,13 +3,12 @@ import libopenflow_01 as of
 
 
 generate_of_seq = of.xid_generator()
-generate_link_seq = of.xid_generator()
 
 SCLT_HELLO          = 0 # set up connection
 SCLT_CLOSE          = 1 # close connection
 SCLT_OF             = 2 # normal of message
 SCLT_LINK_RQST      = 3 # preriodic link request
-SCLT_LINK_RPLY      = 4 # preriodic link reply
+SCLT_LINK_NOTIFY    = 4 # preriodic link reply
 
 OFP_MAX_PORT_NAME_LEN = 16
 
@@ -22,9 +21,9 @@ def addheader(msg, type):
     elif type is SCLT_CLOSE:
         return struct.pack('!BI', type, generate_of_seq()) + msg
     elif type is SCLT_LINK_RQST:
-        return struct.pack('!BI', type, generate_link_seq()) + msg
-    elif type is SCLT_LINK_RPLY:
-        return struct.pack('!BI', type, generate_link_seq()) + msg
+        return struct.pack('!BI', type, generate_of_seq()) + msg
+    elif type is SCLT_LINK_NOTIFY:
+        return struct.pack('!BI', type, generate_of_seq()) + msg
 
 
 def parseheader(msg):
@@ -34,48 +33,50 @@ def parseheader(msg):
           ord(msg[offset+3]) << 8 | ord(msg[offset+4])
     return type, seq, msg[offset+5:]
 
+def link_state_pack(port, state, version):
+    msg = ''
+    port = str(port)
+    if len(port) > OFP_MAX_PORT_NAME_LEN:
+        msg = port[0: OFP_MAX_PORT_NAME_LEN]
+    for i in range(0, OFP_MAX_PORT_NAME_LEN - len(port)):
+        msg = msg + '\0'
+    msg = msg + port
+    msg = msg + struct.pack('!I', state)
+    msg = msg + struct.pack('!I', version)
+    return msg
 
-class scl_link_state(object):
+def link_state_unpack(msg):
+    port = ''
+    for i in range(0, OFP_MAX_PORT_NAME_LEN):
+        port = port + msg[i]
+    port = port.split(b"\x00")
+    port = port[len(port) - 1]
+    offset = OFP_MAX_PORT_NAME_LEN
+    state = ord(msg[offset]) << 24 | ord(msg[offset+1]) << 16 |\
+            ord(msg[offset+2]) << 8 | ord(msg[offset+3])
+    offset = offset + 4
+    version = ord(msg[offset]) << 24 | ord(msg[offset+1]) << 16 |\
+              ord(msg[offset+2]) << 8 | ord(msg[offset+3])
+    return port, state, version
+
+
+class SwitchLinkEvents(object):
     def __init__(self):
-        self.port = ''
-        self.state = 0
+        self.events = {}
+        self.version = {}
+        self.states = {}
 
-    def pack(self, port, state):
-        msg = ''
-        port = str(port)
-        if len(port) > OFP_MAX_PORT_NAME_LEN:
-            # TODO: raise
-            msg = port[0: OFP_MAX_PORT_NAME_LEN]
-        for i in range(0, OFP_MAX_PORT_NAME_LEN - len(port)):
-            msg = msg + '\0'
-        msg = msg + port
-        msg = msg + struct.pack('!I', state)
-        return msg
+    def update(self, port, state):
+        if port not in self.events:
+            self.events[port] = of.xid_generator()
+        self.version[port] = self.events[port]()
+        self.states[port] = state
+        return link_state_pack(port, state, self.version[port])
 
-    def unpack(self, msg):
-        for i in range(0, OFP_MAX_PORT_NAME_LEN):
-            self.port =  self.port + msg[i]
-        port = self.port.split(b"\x00")
-        self.port = port[len(port) - 1]
-        offset = OFP_MAX_PORT_NAME_LEN
-        self.state = ord(msg[offset]) << 24 | ord(msg[offset+1]) << 16 |\
-                     ord(msg[offset+2]) << 8 | ord(msg[offset+3])
-
-
-'''
-scl header description
-
-struct scl_header {
-    uint8_t type;
-    uint32_t seq;
-};
-SCL_ASSERT(sizeof(struct scl_header) == 5)
-
-enum scl_type {
-    SCLT_HELLO          = 0 /* set up connection */
-    SCLT_CLOSE          = 1 /* close connection */
-    SCLT_OF             = 2 /* normal of message */
-    SCLT_LINK_RQST      = 3 /* preriodic link request */
-    SCLT_LINK_RPLY      = 4 /* preriodic link reply */
-};
-'''
+    def current_events(self):
+        msgs = []
+        for port in self.events:
+            msgs.append(
+                link_state_pack(
+                port, self.states[port], self.version[port]))
+        return msgs

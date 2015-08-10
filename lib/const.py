@@ -1,22 +1,25 @@
 # scl tcp listening address
-sw_scl_serv_host = '127.0.0.1'
-sw_scl_serv_port = 6633
+scl_agent_serv_host = '127.0.0.1'
+scl_agent_serv_port = 6633
 
 # scl udp mcast group
-ctrl_scl_mcast_grp = '224.1.1.1'
-ctrl_scl_mcast_port = 6644
-ctrl_scl_intf = '192.168.1.1'
+scl_proxy_mcast_grp = '224.1.1.1'
+scl_proxy_mcast_port = 6644
+scl_proxy_intf = '192.168.1.1'      # depends on host
 # controller listening address
 ctrl_host = '127.0.0.1'
 ctrl_port = 6633
 
 # recv buf size
-RECV_BUF_SIZE = 2048
+RECV_BUF_SIZE = 4096
 
 # ovsdb unix path
 OVSDB = '/var/run/openvswitch/db.sock'
 
-# gossip protocol peer lists
+# gossip protocol
+scl_gossip_mcast_grp = '224.1.1.2'
+scl_gossip_mcast_port = 6655
+scl_gossip_intf = '192.168.1.1'     # depends on host
 peer_lists = [
         ('192.168.1.1', 6655),
         ('192.168.1.10', 6655)]

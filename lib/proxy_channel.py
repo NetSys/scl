@@ -12,10 +12,8 @@ class Streams(object):
     '''
     def __init__(self, host_id, peer_lists):
         self.upstreams = {}         # conn_id: data_to_be_sent_to_controller
-        self.downstreams = {}       # conn_id: data_to_be_sent_to_sw_scl
+        self.downstreams = {}       # conn_id: data_to_be_sent_to_scl_agent
         self.last_of_seqs = {}      # conn_id: last_connection_sequence_num
-
-        # link_log type {conn_id: [max_version, {'link_1': [version, state]}]}
         self.link_log = LinkLog(host_id, peer_lists)
 
     def downstreams_empty(self):
@@ -25,19 +23,16 @@ class Streams(object):
         return True
 
     def open(self, conn_id, of_seq):
-        conn_id_str = str(conn_id)              # same with json str key
         self.upstreams[conn_id] = Queue.Queue()
         self.downstreams[conn_id] = Queue.Queue()
-        self.link_log[conn_id_str] = []         # each conn_id with a list
-        self.link_log[conn_id_str].append(-1)   # max_version
-        self.link_log[conn_id_str].append({})   # link state dict
         self.last_of_seqs[conn_id] = of_seq
+        self.link_log.open(str(conn_id))
 
     def delete(self, conn_id):
         del self.upstreams[conn_id]
         del self.downstreams[conn_id]
-        del self.link_log[str(conn_id)]
         del self.last_of_seqs[conn_id]
+        self.link_log.delete(str(conn_id))
 
 
 class Scl2Ctrl(object):
@@ -100,7 +95,7 @@ class Scl2Ctrl(object):
         conn = self.tcp_conns.id2conn[conn_id]
         if conn.connectted:
             self.logger.info(
-                'the connection to controller is closed by ctrl_scl, '
+                'the connection to controller is closed by scl_proxy, '
                 'conn_id: %d', conn_id)
             self.clean_connection(conn.sock, conn_id)
 
@@ -109,8 +104,7 @@ class Scl2Ctrl(object):
         selector.wait(self.inputs, self.outputs)
 
     def run(self, lists):
-        # FIXME: run pox after scl, err: dict changed size during iteration
-        for s in self.tcp_conns.sock2conn:
+        for s in self.tcp_conns.sock2conn.keys():
             # socket is writeable
             if s in lists[1]:
                 conn = self.tcp_conns.sock2conn[s]
@@ -156,10 +150,10 @@ class Scl2Scl(object):
     one udp socket as a multicast listener
     '''
     def __init__(
-            self, ctrl_scl_mcast_grp, ctrl_scl_mcast_port,
-            ctrl_scl_intf, scl2ctrl, timer, streams, logger):
+            self, scl_proxy_mcast_grp, scl_proxy_mcast_port,
+            scl_proxy_intf, scl2ctrl, timer, streams, logger):
         self.udp_mcast = UdpMcastListener(
-                ctrl_scl_mcast_grp, ctrl_scl_mcast_port, ctrl_scl_intf)
+                scl_proxy_mcast_grp, scl_proxy_mcast_port, scl_proxy_intf)
         self.udp_mcast.open()
         self.scl2ctrl = scl2ctrl
         self.timer = timer
@@ -180,7 +174,7 @@ class Scl2Scl(object):
                 'receive wrong type msg (except SCLT_HELLO)')
         else:
             if self.streams.last_of_seqs[conn_id] >= seq:
-                self.logger.warn('receive disordered msg from sw_scl')
+                self.logger.warn('receive disordered msg from scl_agent')
             else:
                 self.streams.last_of_seqs[conn_id] = seq
                 self.logger.debug('receive SCLT_OF')
@@ -192,33 +186,30 @@ class Scl2Scl(object):
                 'receive wrong type msg (except SCLT_HELLO)')
         else:
             if self.streams.last_of_seqs[conn_id] >= seq:
-                self.logger.warn('receive disordered msg from sw_scl')
+                self.logger.warn('receive disordered msg from scl_agent')
             else:
                 # close the connection from scl to controller
                 self.streams.last_of_seqs[conn_id] = seq
                 self.logger.debug('receive SCLT_CLOSE')
                 self.scl2ctrl.close_connection(conn_id)
 
-    def handle_link_rply_msg(self, conn_id, seq, data):
-        # TODO: simplify code
-        switch = str(conn_id)  # same with json str key
-        if switch not in self.streams.link_log:
+    def handle_link_notify_msg(self, conn_id, seq, data):
+        switch = str(conn_id)
+        if switch not in self.streams.link_log.switches():
             self.logger.warn(
                 'receive wrong type msg (except SCLT_HELLO)')
         else:
             # parse scl link state msg
-            link_state = scl.scl_link_state()
-            link_state.unpack(data)
-            self.streams.link_log.update(
-                    switch, link_state.port, seq, link_state.state)
+            port, state, version = scl.link_state_unpack(data)
+            self.streams.link_log.update(switch, port, version, state)
             self.logger.info(
-                    '%s, %s, %s; ver: %d' % (
-                        id2str(conn_id), link_state.port,
-                        'up' if link_state.state == 0 else 'down', seq))
+                    '%s, %s, version: %d, state: %s' % (
+                        id2str(conn_id), port, version,
+                        'up' if state == 0 else 'down'))
 
     def process_data(self, conn_id, type, seq, data):
         '''
-        process data received from sw_scl
+        process data received from scl_agent
         classify type, check sequence num, msg enqueue
         '''
         if type is scl.SCLT_OF:
@@ -227,8 +218,8 @@ class Scl2Scl(object):
             self.handle_hello_msg(conn_id, seq, data)
         elif type is scl.SCLT_CLOSE:
             self.handle_close_msg(conn_id, seq, data)
-        elif type is scl.SCLT_LINK_RPLY:
-            self.handle_link_rply_msg(conn_id, seq, data)
+        elif type is scl.SCLT_LINK_NOTIFY:
+            self.handle_link_notify_msg(conn_id, seq, data)
 
     def wait(self, selector):
         if not self.streams.downstreams_empty():
@@ -242,14 +233,14 @@ class Scl2Scl(object):
             for conn_id in self.streams.downstreams:
                 if not self.streams.downstreams[conn_id].empty():
                     self.logger.debug(
-                        'send msg to sw_scl %s' % id2str(conn_id))
+                        'send msg to scl_agent %s' % id2str(conn_id))
                     next_msg = self.streams.downstreams[conn_id].get_nowait()
                     self.udp_mcast.sendto(next_msg, conn_id)
 
         # socket is readable
         if self.udp_mcast.sock in lists[0]:
             data, conn_id = self.udp_mcast.recvfrom(RECV_BUF_SIZE)
-            self.logger.debug('receive msg from sw_scl %s' % id2str(conn_id))
+            self.logger.debug('receive msg from scl_agent %s' % id2str(conn_id))
             if data:
                 type, seq, data = scl.parseheader(data)
                 self.process_data(conn_id, type, seq, data)
@@ -261,7 +252,7 @@ class Scl2Scl(object):
             self.logger.debug('periodically send rqst msg')
             for conn_id in self.streams.downstreams:
                 self.logger.debug(
-                        'send link state request msg to sw_scl '
+                        'send link state request msg to scl_agent '
                         '%s' % id2str(conn_id))
                 self.udp_mcast.sendto(
                         scl.addheader('', scl.SCLT_LINK_RQST), conn_id)

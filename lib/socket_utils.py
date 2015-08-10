@@ -66,6 +66,10 @@ class UdpMcastListener(object):
     def sendto(self, msg, addr_id):
         self.sock.sendto(msg, self.dst_addr[addr_id])
 
+    def multicast(self, msg):
+        # route add -host self.src_grp dev self.intf
+        self.sock.sendto(msg, (self.src_grp, self.src_port))
+
 class TcpConn(object):
     '''
     For scl on the switch side, connect to switch.

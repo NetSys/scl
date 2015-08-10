@@ -1,6 +1,7 @@
 import socket
 import random
 import json
+from socket_utils import *
 from const import RECV_BUF_SIZE
 
 
@@ -23,6 +24,17 @@ class LinkLog(object):
         self.log = {}
         self.peer_num = len(peer_lists) - 1     # not self
 
+    def switches(self):
+        return self.log.keys()
+
+    def open(self, switch):
+        if switch not in self.log:
+            self.log[switch] = {}
+
+    def delete(self, switch):
+        if switch in self.log:
+            del self.log[switch]
+
     def update(self, switch, link, event, state, peer=None):
         if switch not in self.log:
             self.log[switch] = {}
@@ -31,8 +43,9 @@ class LinkLog(object):
         if event not in self.log[switch][link]:
             self.log[switch][link][event] = {}
             self.log[switch][link][event]['state'] = state
+            self.log[switch][link][event]['peers'] = {}
         if peer is not None:
-            self.log[switch][link][event]['peers'].append(peer)
+            self.log[switch][link][event]['peers'][peer] = True
 
     def digest(self):
         '''
@@ -56,25 +69,22 @@ class LinkLog(object):
         return digest
 
     def subtract_events(self, switch, link, events):
-        ret = []
+        ret = {}
         self_events = sorted(self.log[switch][link].keys())
         # TODO: refine code
         for e in events:
             if e is events[0]:
                 for self_e in self_events:
                     if e > self_e:
-                        ret.append((
-                            self_e, self.log[switch][link][self_e]['state']))
+                        ret[self_e] = self.log[switch][link][self_e]
             if e is events[-1]:
                 for self_e in self_events:
                     if e < self_e:
-                        ret.append((
-                            self_e, self.log[switch][link][self_e]['state']))
+                        ret[self_e] = self.log[switch][link][self_e]
             if e is not events[0] and e is not events[-1]:
                 for self_e in self_events:
                     if e[0] < self_e and e[1] > self_e:
-                        ret.append((
-                            self_e, self.log[switch][link][self_e]['state']))
+                        ret[self_e] = self.log[switch][link][self_e]
         return ret
 
     def subtract_log(self, digest):
@@ -105,17 +115,20 @@ class LinkLog(object):
             for link in self.log[switch]:
                 events = sorted(self.log[switch][link].keys())
                 for e in events:
-                    if len(self.log[switch][link][e]['peers']) is self.peer_num:
+                    if len(self.log[switch][link][e]['peers'].keys()) is self.peer_num:
                         del self.log[switch][link][e]   # or write it to disk
                     else:
                         break
 
 
 class Gossiper(object):
-    def __init__(self, host_id, peer_lists, timer, streams, logger):
-        self._open(host_id, peer_lists)
+    def __init__(
+            self, scl_gossip_mcast_grp, scl_gossip_mcast_port, scl_gossip_intf,
+            host_id, peer_lists, timer, streams, logger):
+        self.udp_mcast = UdpMcastListener(
+                scl_gossip_mcast_grp, scl_gossip_mcast_port, scl_gossip_intf)
+        self.udp_mcast.open()
         self.timer = timer
-        # link_log type {sw: [max_version, {'link': [version, state]}]}
         self.link_log = streams.link_log
         self.logger = logger
 
@@ -142,42 +155,43 @@ class Gossiper(object):
     def _handle_syn(self, data, addr):
         self.logger.debug(
                 "receive syn from %s, digest: %s" % (
-                    addr[0], json.dumps(data['digest'])))
+                    id2str(addr), json.dumps(data['digest'])))
 
         delta = self.link_log.subtract_log(data['digest'])
 
         if delta:
             self.logger.debug(
                     "send ack to %s, delta: %s" % (
-                        addr[0], json.dumps(delta)))
-            self.sock.sendto(json.dumps(
+                        id2str(addr), json.dumps(delta)))
+            self.udp_mcast.sendto(json.dumps(
                 {'type': 'ack', 'delta': delta}), addr)
 
     def _handle_ack(self, data, addr):
         self.logger.debug(
                 "receive ack from %s, delta: %s" % (
-                    addr[0], json.dumps(data['delta'])))
+                    id2str(addr), json.dumps(data['delta'])))
         for switch in data['delta']:
             for link in data['delta'][switch]:
-                for event, state in data['delta'][switch][link].iteritems():
-                    self.link_log.update(switch, link, event, state, addr)
+                for event, items in data['delta'][switch][link].iteritems():
+                    event = int(event)
+                    self.link_log.update(switch, link, event, items['state'], addr)
+                    for peer in items['peers']:
+                        self.link_log.update(switch, link, event, items['state'], peer)
 
     def wait(self, selector):
-        selector.wait([self.sock], [])
+        selector.wait([self.udp_mcast.sock], [])
 
     def run(self, lists):
         # socket is readable
-        if self.sock in lists[0]:
-            self.logger.info("current link log: %s" % json.dumps(self.link_log))
-            data, addr = self.sock.recvfrom(RECV_BUF_SIZE)
+        if self.udp_mcast.sock in lists[0]:
+            self.logger.info("current link log: %s" % json.dumps(self.link_log.log))
+            data, addr = self.udp_mcast.recvfrom(RECV_BUF_SIZE)
             self._handle_msg(byteify(json.loads(data)), addr)
 
         # check timer, time up per second
         if self.timer.time_up:
-            addr = random.choice(self.peer_lists)
             self.logger.debug(
-                    "send syn to %s, digest: %s" % (
-                        addr[0], json.dumps(self.link_log.digest())))
-            self.sock.sendto(json.dumps({
-                'type': 'syn', 'digest': self.link_log.digest()
-                }), addr)
+                    "broadcast syn, digest: %s" % (
+                        json.dumps(self.link_log.digest())))
+            self.udp_mcast.multicast(json.dumps({
+                'type': 'syn', 'digest': self.link_log.digest()}))
