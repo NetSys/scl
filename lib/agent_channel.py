@@ -14,6 +14,7 @@ class Streams(object):
         self.upstream = Queue.Queue()
         self.downstream = Queue.Queue()
         self.link_events = scl.SwitchLinkEvents()
+        self.connected = False
         self.last_of_seq = -1
         self.datapath_id = None
 
@@ -69,9 +70,10 @@ class Scl2Sw(object):
             elif of_type == 1:
                 error = ofp_error()
                 error.unpack(data[offset: offset + msg_length])
-                self.logger.debug(
-                        'ofp_error, type: %d, code: %d, data: %s',
-                        error.type, error.code, error.data)
+                print error.show()
+                #self.logger.debug(
+                #        'ofp_error, type: %d, code: %d, data: %s',
+                #        error.type, error.code, error.data)
 
             offset = offset + msg_length
 
@@ -81,6 +83,7 @@ class Scl2Sw(object):
         self.streams.downstream.queue.clear()
         self.streams.upstream.put(scl.addheader('', scl.SCLT_CLOSE))
         self.streams.last_of_seq = -1
+        self.streams.connected = False
 
     def wait(self, selector):
         if not self.tcp_client:
@@ -157,6 +160,9 @@ class Scl2Scl(object):
             self.logger.debug('of_type: %d, msg_length: %d' % (of_type, msg_length))
             if data_length - offset < msg_length:
                 break
+            # OFPT_ECHO_REPLY
+            if of_type == 3:
+                self.streams.connected = True
             offset = offset + msg_length
 
     def wait(self, selector):
@@ -172,8 +178,12 @@ class Scl2Scl(object):
             if data:
                 # deal with commands from scl proxies
                 type, seq, data = scl.parseheader(data)
-                if type is scl.SCLT_OF and seq > self.streams.last_of_seq:
+                if type is scl.SCLT_OF and not self.streams.connected\
+                        and seq > self.streams.last_of_seq:
                     self.streams.last_of_seq = seq
+                    self.logger.debug('receive of msg from scl_proxy %s', addr[0])
+                    self.handle_of_msg(data)
+                elif type is scl.SCLT_OF and self.streams.connected:
                     self.logger.debug('receive of msg from scl_proxy %s', addr[0])
                     self.handle_of_msg(data)
                 elif type is scl.SCLT_LINK_RQST:
