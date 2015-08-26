@@ -10,11 +10,11 @@ class Streams(object):
     '''
     data received or to be sent
     '''
-    def __init__(self, host_id, peer_lists):
+    def __init__(self, host_id, hosts_num):
         self.upstreams = {}         # conn_id: data_to_be_sent_to_controller
         self.downstreams = {}       # conn_id: data_to_be_sent_to_scl_agent
         self.last_of_seqs = {}      # conn_id: last_connection_sequence_num
-        self.link_log = LinkLog(host_id, peer_lists)
+        self.link_log = LinkLog(host_id, hosts_num)
 
     def downstreams_empty(self):
         for k in self.downstreams:
@@ -26,13 +26,13 @@ class Streams(object):
         self.upstreams[conn_id] = Queue.Queue()
         self.downstreams[conn_id] = Queue.Queue()
         self.last_of_seqs[conn_id] = of_seq
-        self.link_log.open(str(conn_id))
+        self.link_log.open(id2str(conn_id))
 
     def delete(self, conn_id):
         del self.upstreams[conn_id]
         del self.downstreams[conn_id]
         del self.last_of_seqs[conn_id]
-        self.link_log.delete(str(conn_id))
+        self.link_log.delete(id2str(conn_id))
 
 
 class Scl2Ctrl(object):
@@ -194,7 +194,7 @@ class Scl2Scl(object):
                 self.scl2ctrl.close_connection(conn_id)
 
     def handle_link_notify_msg(self, conn_id, seq, data):
-        switch = str(conn_id)
+        switch = id2str(conn_id)
         if switch not in self.streams.link_log.switches():
             self.logger.warn(
                 'receive wrong type msg (except SCLT_HELLO)')
@@ -204,7 +204,7 @@ class Scl2Scl(object):
             self.streams.link_log.update(switch, port, version, state)
             self.logger.info(
                     '%s, %s, version: %d, state: %s' % (
-                        id2str(conn_id), port, version,
+                        switch, port, version,
                         'up' if state == 0 else 'down'))
 
     def process_data(self, conn_id, type, seq, data):

@@ -23,4 +23,5 @@ scl_gossip_intf = '192.168.1.1'     # depends on host
 peer_lists = [
         ('192.168.1.1', 6655),
         ('192.168.1.10', 6655)]
+hosts_num = 2
 host_id = 0

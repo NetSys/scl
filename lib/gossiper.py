@@ -20,9 +20,9 @@ def byteify(input):
 
 
 class LinkLog(object):
-    def __init__(self, host_id, peer_lists):
+    def __init__(self, host_id, hosts_num):
         self.log = {}
-        self.peer_num = len(peer_lists) - 1     # not self
+        self.peer_num = int(hosts_num) - 1     # not self
 
     def switches(self):
         return self.log.keys()
@@ -124,7 +124,7 @@ class LinkLog(object):
 class Gossiper(object):
     def __init__(
             self, scl_gossip_mcast_grp, scl_gossip_mcast_port, scl_gossip_intf,
-            host_id, peer_lists, timer, streams, logger):
+            host_id, timer, streams, logger):
         self.udp_mcast = UdpMcastListener(
                 scl_gossip_mcast_grp, scl_gossip_mcast_port, scl_gossip_intf)
         self.udp_mcast.open()
@@ -140,7 +140,7 @@ class Gossiper(object):
         del peer_lists[host_id]
         self.peer_lists = peer_lists
 
-    def _handle_msg(self, data, addr):
+    def _handle_msg(self, data, addr_id):
         '''
                  **pull method**
         |---       syn, digest        -->|
@@ -148,28 +148,30 @@ class Gossiper(object):
         |<-- ack, response of missing ---|
         '''
         if data['type'] == 'syn':
-            self._handle_syn(data, addr)
+            self._handle_syn(data, addr_id)
         elif data['type'] == 'ack':
-            self._handle_ack(data, addr)
+            self._handle_ack(data, addr_id)
 
-    def _handle_syn(self, data, addr):
+    def _handle_syn(self, data, addr_id):
+        addr = id2str(addr_id)
         self.logger.debug(
                 "receive syn from %s, digest: %s" % (
-                    id2str(addr), json.dumps(data['digest'])))
+                    addr, json.dumps(data['digest'])))
 
         delta = self.link_log.subtract_log(data['digest'])
 
         if delta:
             self.logger.debug(
                     "send ack to %s, delta: %s" % (
-                        id2str(addr), json.dumps(delta)))
+                        addr, json.dumps(delta)))
             self.udp_mcast.sendto(json.dumps(
-                {'type': 'ack', 'delta': delta}), addr)
+                {'type': 'ack', 'delta': delta}), addr_id)
 
-    def _handle_ack(self, data, addr):
+    def _handle_ack(self, data, addr_id):
+        addr = id2str(addr_id)
         self.logger.debug(
                 "receive ack from %s, delta: %s" % (
-                    id2str(addr), json.dumps(data['delta'])))
+                    addr, json.dumps(data['delta'])))
         for switch in data['delta']:
             for link in data['delta'][switch]:
                 for event, items in data['delta'][switch][link].iteritems():
@@ -185,8 +187,8 @@ class Gossiper(object):
         # socket is readable
         if self.udp_mcast.sock in lists[0]:
             self.logger.info("current link log: %s" % json.dumps(self.link_log.log))
-            data, addr = self.udp_mcast.recvfrom(RECV_BUF_SIZE)
-            self._handle_msg(byteify(json.loads(data)), addr)
+            data, addr_id = self.udp_mcast.recvfrom(RECV_BUF_SIZE)
+            self._handle_msg(byteify(json.loads(data)), addr_id)
 
         # check timer, time up per second
         if self.timer.time_up:
