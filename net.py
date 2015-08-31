@@ -1,4 +1,5 @@
-from net_utils.topo import FatTree
+import os
+from net_utils.topo import topo2file, FatTree
 from mininet.net import Mininet
 from mininet.cli import CLI
 from mininet.node import Controller, RemoteController
@@ -9,19 +10,21 @@ DIR = 'bash net_utils'
 LOG_LEVEL = 'debug'
 
 class SclNet(object):
-    def __init__(self, topo='FatTree'):
+    def __init__(self, topo='fattree'):
         self.switches = []
         self.hosts = []
         # TODO: hard code now, use config file instead
         self.ctrls = [3, 7, 8, 15]
-        self.graph = nx.Graph()
         setLogLevel(LOG_LEVEL)
         # set up topology skeleton
-        if topo is 'FatTree':
-            self.skeleton = FatTree(4, self.graph, self.switches, self.hosts)
+        if topo is 'fattree':
+            self.skeleton = FatTree(4, self.switches, self.hosts)
         # autoStaticArp doesnt works well, because we will move the IP in
         # the host interface to the internal port of the switch
         self.net = Mininet(topo=self.skeleton, controller=None)
+        # write topology to file
+        self.file_name = os.path.abspath('./conf') + '/' + 'fattree.json'
+        topo2file(self.file_name, self.net, self.switches, self.hosts, self.ctrls)
         # FIXME: deal with handshake problem
         self.start_scl_agent()
         self.start_scl_proxy()
@@ -37,7 +40,7 @@ class SclNet(object):
         sw_id = 0
         for sw_name in self.switches:
             sw = self.net.getNodeByName(sw_name)
-            sw.cmd('python scl_agent.py %d &' % sw_id)
+            sw.cmd('python scl_agent.py %d %s > log/scl_agent_%d.log 2>&1 &' % (sw_id, sw.IP(), sw_id))
             sw_id = sw_id + 1
 
     def start_scl_proxy(self):
@@ -47,7 +50,7 @@ class SclNet(object):
             host = self.net.getNodeByName(self.hosts[ctrl])
             # add default route to send broadcast msg
             host.cmdPrint('route add default gw %s' % host.IP())
-            host.cmdPrint('python scl_proxy.py %d %d %s &' % (ctrl_id, ctrls_num, host.IP()))
+            host.cmdPrint('python scl_proxy.py %d %d %s > log/scl_proxy_%d.log 2>&1 &' % (ctrl_id, ctrls_num, host.IP(), ctrl_id))
             ctrl_id = ctrl_id + 1
 
     def start_controller(self):
@@ -56,7 +59,8 @@ class SclNet(object):
         pox_datefmt='"%Y%m%d %H:%M:%S"'
         for ctrl in self.ctrls:
             host = self.net.getNodeByName(self.hosts[ctrl])
-            host.cmd('python pox/pox.py log.level --DEBUG log --file=log/ctrl_%d.log,w --format=%s --datefmt=%s forwarding.l2_learning &' % (ctrl_id, pox_format, pox_datefmt))
+            # NOTE: hard code
+            host.cmd('python pox/pox.py log.level --DEBUG log --file=log/ctrl_%d.log,w --format=%s --datefmt=%s scl_routing --name=%s &' % (ctrl_id, pox_format, pox_datefmt, self.file_name))
             ctrl_id = ctrl_id + 1
 
     def start_switch(self):
@@ -84,7 +88,7 @@ class SclNet(object):
 
     def start_connection(self):
         sw = self.net.getNodeByName(self.switches[3])
-        sw.cmdPrint('tcpdump -i lo -enn -w s003.pcap &')
+        #sw.cmdPrint('tcpdump -i lo -enn -w s003.pcap &')
         for sw_name in self.switches:
             sw = self.net.getNodeByName(sw_name)
             sw.cmdPrint('%s/start_connection.sh %s' % (DIR, sw_name))

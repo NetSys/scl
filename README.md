@@ -2,6 +2,13 @@
 
 first put controller codes in the scl directory, like scl/pox/
 
+to avoid the controller flushes the flow entries on switches, comment related codes in the controller
+for example, pox/pox/openflow/of_01.py
+``` Bash
+148 # if con.ofnexus.clear_flows_on_connect:
+149 #   con.send(of.ofp_flow_mod(match=of.ofp_match(), command=of.OFPFC_DELETE))
+```
+
 start emulation
 ``` Bash
 ./run.py

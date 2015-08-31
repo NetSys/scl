@@ -1,12 +1,121 @@
 import Queue
 import socket
-from const import RECV_BUF_SIZE
+from conf.const import RECV_BUF_SIZE
 from socket_utils import *
-from lib.ovsdb_utils import OvsdbConn
-from lib.libopenflow_01 import ofp_port_status
-from lib.libopenflow_01 import ofp_features_reply
-from lib.libopenflow_01 import ofp_error
+from ovsdb_utils import OvsdbConn
+import libopenflow_01 as of
 import scl_protocol as scl
+
+
+# some functions from pox controller
+# pox/pox/openflow/util.py
+# pox/pox/openflow/of_01.py
+#----------------------------------------------------------------------------#
+def make_type_to_unpacker_table():
+    """
+    Returns a list of unpack methods.
+
+    The resulting list maps OpenFlow types to functions which unpack
+    data for those types into message objects.
+    """
+    top = max(of._message_type_to_class)
+    r = [of._message_type_to_class[i].unpack_new for i in range(0, top)]
+    return r
+
+unpackers = make_type_to_unpacker_table()
+
+def handle_HELLO(scl2sw, msg):
+    hello = of.ofp_hello()
+    scl2sw.streams.downstream.put(hello.pack())
+    msg = of.ofp_features_request()
+    scl2sw.streams.downstream.put(msg.pack())
+
+def handle_ECHO_REPLY(scl2sw, msg):
+    pass
+
+def handle_ECHO_REQUEST(scl2sw, msg):
+    if scl2sw.streams.sw_connected:
+        reply = msg
+        reply.header_type = of.OFPT_ECHO_REPLY
+        scl2sw.streams.downstream.put(reply.pack())
+
+def handle_FEATURES_REPLY(scl2sw, msg):
+    scl2sw.streams.sw_features = msg
+    scl2sw.streams.dpid = hex(msg.datapath_id)[2:].zfill(16)
+    for port in msg.ports:
+        # port name like s001 is internal port, pass it
+        if len(port.name.split('-')) is 1:
+            continue
+        scl2sw.logger.info('port_status: %s %d' % (port.name, port.state))
+        link_msg = scl2sw.streams.link_events.update(
+                port.name, port.port_no, port.state)
+        scl2sw.streams.upstream.put(scl.addheader(link_msg, scl.SCLT_LINK_NOTIFY))
+
+    set_config = of.ofp_set_config()
+    barrier = of.ofp_barrier_request()
+    scl2sw.streams.barrier_xid = barrier.xid
+    scl2sw.streams.downstream.put(set_config.pack())
+    scl2sw.streams.downstream.put(barrier.pack())
+
+def handle_PORT_STATUS(scl2sw, msg):
+    if msg.reason == of.OFPPR_DELETE:
+        # TODO: scl.SCLT_LINK_DELETE?
+        pass
+    elif len(msg.desc.name.split('-')) is 1:
+        # port name like s001 is internal port, pass it
+        pass
+    else:
+        scl2sw.logger.info('port_status: %s %d' % (msg.desc.name, msg.desc.state))
+        link_msg = scl2sw.streams.link_events.update(
+                msg.desc.name, msg.desc.port_no, msg.desc.state)
+        scl2sw.streams.upstream.put(scl.addheader(link_msg, scl.SCLT_LINK_NOTIFY))
+
+def handle_PACKET_IN(scl2sw, msg):
+    scl2sw.streams.upstream.put(scl.addheader(msg.pack(), scl.SCLT_OF))
+
+def handle_ERROR_MSG(scl2sw, msg):
+    scl2sw.logger.info('ofp_error: %s' % msg.show())
+
+    # deal with barrier corner case
+    if msg.xid != scl2sw.streams.barrier.xid: return
+    if msg.ofp.type != of.OFPET_BAD_REQUEST: return
+    if msg.ofp.code != of.OFPBRC_BAD_TYPE: return
+    # Okay, so this is probably an HP switch that doesn't support barriers
+    # (ugh).  We'll just assume that things are okay.
+    scl2sw.logger.info('connection handshake successes')
+    scl2sw.streams.sw_connected = True
+
+def handle_BARRIER(scl2sw, msg):
+    if msg.xid != scl2sw.streams.barrier_xid:
+        scl2sw.logger.info('connection to switch closed by scl_agent')
+        scl2sw.tcp_client.close()
+        scl2sw.client_close()
+    else:
+        scl2sw.logger.info('connection handshake successes')
+        scl2sw.streams.sw_connected = True
+
+# A list, where the index is an OFPT, and the value is a function to
+# call for that type
+# This is generated automatically based on handlerMap
+handlers = []
+
+# Message handlers
+handlerMap = {
+    of.OFPT_HELLO : handle_HELLO,
+    of.OFPT_ECHO_REQUEST : handle_ECHO_REQUEST,
+    of.OFPT_ECHO_REPLY : handle_ECHO_REPLY,
+    of.OFPT_PACKET_IN : handle_PACKET_IN,
+    of.OFPT_FEATURES_REPLY : handle_FEATURES_REPLY,
+    of.OFPT_PORT_STATUS : handle_PORT_STATUS,
+    of.OFPT_ERROR : handle_ERROR_MSG,
+    of.OFPT_BARRIER_REPLY : handle_BARRIER,
+}
+
+def _set_handlers ():
+    handlers.extend([None] * (1 + sorted(handlerMap.keys(),reverse=True)[0]))
+    for h in handlerMap:
+        handlers[h] = handlerMap[h]
+#----------------------------------------------------------------------------#
 
 
 class Streams(object):
@@ -14,9 +123,11 @@ class Streams(object):
         self.upstream = Queue.Queue()
         self.downstream = Queue.Queue()
         self.link_events = scl.SwitchLinkEvents()
-        self.connected = False
+        self.sw_connected = False
         self.last_of_seq = -1
+        self.sw_features = None
         self.datapath_id = None
+        self.barrier_xid = 0
 
 
 class Scl2Sw(object):
@@ -26,64 +137,57 @@ class Scl2Sw(object):
         self.tcp_client = None
         self.streams = streams
         self.logger = logger
-
-    def handle_port_status(self, data):
-        port_status = ofp_port_status()
-        port_status.unpack(data)
-        self.logger.info(
-            'openflow msg %s %d' % (
-                port_status.desc.name, port_status.desc.state))
-        msg = self.streams.link_events.update(
-            port_status.desc.name, port_status.desc.state)
-        self.streams.upstream.put(scl.addheader(msg, scl.SCLT_LINK_NOTIFY))
+        _set_handlers()
 
     def handle_of_msg(self, data):
         '''
-        parse openflow messages
-        put data into upstream
+        handshake
+        port_status
         '''
-        self.streams.upstream.put(scl.addheader(data, scl.SCLT_OF))
         offset = 0
         data_length = len(data)
         self.logger.debug('data_length: %d' % data_length)
-        # parse multiple of msgs in one data
+        # parse multiple msgs in data
         while data_length - offset >= 8:
-            of_type = ord(data[offset + 1])
+            ofp_type = ord(data[offset + 1])
+
+            # ofp version checking
+            if ord(data[offset]) != of.OFP_VERSION:
+                if ofp_type == of.OFPT_HELLO:
+                    pass    # wait for switches to be timeout
+                else:
+                    self.logger.warn(
+                            'Bad OpenFlow version (0x%02x)' % ord(data[offset]))
+                    break
+
+            # ofp msg length checking
             msg_length = ord(data[offset + 2]) << 8 | ord(data[offset + 3])
-            if msg_length is 0:
+            if msg_length is 0 or data_length - offset < msg_length:
                 self.logger.error('msg_length: %d, buffer error' % msg_length)
                 break
-            self.logger.debug('of_type: %d, msg_length: %d' % (of_type, msg_length))
-            if data_length - offset < msg_length:
-                break
+            self.logger.debug('ofp_type: %d, msg_length: %d' % (ofp_type, msg_length))
 
-            # OFPT_PORT_STATUS
-            if of_type == 12:
-                self.handle_port_status(data[offset: offset + msg_length])
-            # OFPT_FEATURES_REPLY
-            elif of_type == 6:
-                features_reply = ofp_features_reply()
-                features_reply.unpack(data[offset: offset + msg_length])
-                self.streams.datapath_id =\
-                    hex(features_reply.datapath_id)[2:].zfill(16)
-            # OFPT_ERROR
-            elif of_type == 1:
-                error = ofp_error()
-                error.unpack(data[offset: offset + msg_length])
-                print error.show()
-                #self.logger.debug(
-                #        'ofp_error, type: %d, code: %d, data: %s',
-                #        error.type, error.code, error.data)
+            # unpack msg according to ofp_type
+            new_offset, msg = unpackers[ofp_type](data, offset)
+            assert new_offset - offset == msg_length
+            offset = new_offset
 
-            offset = offset + msg_length
+            # handle ofp msg
+            try:
+                h = handlers[ofp_type]
+                h(self, msg)
+            except Exception, e:
+                self.logger.error(
+                        "Exception while handling OpenFlow %s msg, err: %s" % (ofp_type, e))
 
     def client_close(self):
         self.tcp_client = None
-        # send connection close msg to controller
         self.streams.downstream.queue.clear()
-        self.streams.upstream.put(scl.addheader('', scl.SCLT_CLOSE))
         self.streams.last_of_seq = -1
-        self.streams.connected = False
+        self.streams.sw_connected = False
+        self.streams.sw_features = None
+        self.streams.barrier_xid = 0
+        self.streams.datapath_id = None
 
     def wait(self, selector):
         if not self.tcp_client:
@@ -99,14 +203,10 @@ class Scl2Sw(object):
             self.logger.info('new connection from the switch')
             self.tcp_client, addr = self.tcp_serv.sock.accept()
             self.tcp_client.setblocking(0)      # non-blocking
-            self.logger.debug(
-                'send SCLT_HELLO msg to scl_proxy to '
-                'set up connection between scl_proxy and controller')
-            self.streams.upstream.put(scl.addheader('', scl.SCLT_HELLO))
 
         # socket is readable
         if self.tcp_client in lists[0]:
-            self.logger.debug('receive msg from switch')
+            self.logger.debug('receive msgs from the switch')
             try:
                 data = self.tcp_client.recv(RECV_BUF_SIZE)
                 if data:
@@ -131,9 +231,12 @@ class Scl2Sw(object):
 
 
 class Scl2Scl(object):
-    def __init__(self, scl_proxy_mcast_grp, scl_proxy_mcast_port, streams, logger):
-        self.udp_conn = UdpConn(scl_proxy_mcast_grp, scl_proxy_mcast_port)
-        self.udp_conn.open()
+    def __init__(self, scl_agent_mcast_grp, scl_agent_mcast_port, scl_agent_intf,
+            scl_proxy_mcast_grp, scl_proxy_mcast_port, streams, logger):
+        self.udp_mcast = UdpMcastListener(
+                scl_agent_mcast_grp, scl_agent_mcast_port, scl_agent_intf,
+                scl_proxy_mcast_grp, scl_proxy_mcast_port)
+        self.udp_mcast.open()
         self.streams = streams
         self.logger = logger
 
@@ -146,7 +249,6 @@ class Scl2Scl(object):
         parse of openflow messages
         put data into downstream
         '''
-        self.streams.downstream.put(data)
         offset = 0
         data_length = len(data)
         self.logger.debug('data_length: %d' % data_length)
@@ -154,44 +256,38 @@ class Scl2Scl(object):
         while data_length - offset >= 8:
             of_type = ord(data[offset + 1])
             msg_length = ord(data[offset + 2]) << 8 | ord(data[offset + 3])
-            if msg_length is 0:
+            if msg_length is 0 or data_length - offset < msg_length:
                 self.logger.error('msg_length: %d, buffer error' % msg_length)
                 break
             self.logger.debug('of_type: %d, msg_length: %d' % (of_type, msg_length))
-            if data_length - offset < msg_length:
-                break
-            # OFPT_ECHO_REPLY
-            if of_type == 3:
-                self.streams.connected = True
+            self.streams.downstream.put(data[offset: offset + msg_length])
             offset = offset + msg_length
 
     def wait(self, selector):
         if not self.streams.upstream.empty():
-            selector.wait([self.udp_conn.sock], [self.udp_conn.sock])
+            selector.wait([self.udp_mcast.sock], [self.udp_mcast.sock])
         else:
-            selector.wait([self.udp_conn.sock], [])
+            selector.wait([self.udp_mcast.sock], [])
 
     def run(self, lists):
         # socket is readable
-        if self.udp_conn.sock in lists[0]:
-            data, addr = self.udp_conn.sock.recvfrom(RECV_BUF_SIZE)
+        if self.udp_mcast.sock in lists[0]:
+            data, addr = self.udp_mcast.sock.recvfrom(RECV_BUF_SIZE)
             if data:
                 # deal with commands from scl proxies
-                type, seq, data = scl.parseheader(data)
-                if type is scl.SCLT_OF and not self.streams.connected\
-                        and seq > self.streams.last_of_seq:
-                    self.streams.last_of_seq = seq
-                    self.logger.debug('receive of msg from scl_proxy %s', addr[0])
+                scl_type, seq, data = scl.parseheader(data)
+                if scl_type is scl.SCLT_OF and not self.streams.sw_connected:
+                    self.logger.error('receive ofp_msg from scl_proxy ',
+                            addr[0], 'while connection to switch closed')
+                elif scl_type is scl.SCLT_OF and self.streams.sw_connected:
+                    self.logger.debug('receive ofp_msg from scl_proxy %s' % addr[0])
                     self.handle_of_msg(data)
-                elif type is scl.SCLT_OF and self.streams.connected:
-                    self.logger.debug('receive of msg from scl_proxy %s', addr[0])
-                    self.handle_of_msg(data)
-                elif type is scl.SCLT_LINK_RQST:
-                    self.logger.debug('receive link rqst msg from scl_proxy %s', addr[0])
+                elif scl_type is scl.SCLT_LINK_RQST:
+                    self.logger.debug('receive sclt_link_rqst msg from scl_proxy %s' % addr[0])
                     self.hand_link_request()
 
         # socket is writeable
-        if self.udp_conn.sock in lists[1]:
+        if self.udp_mcast.sock in lists[1]:
             self.logger.debug('broadcast msg to scl_proxy')
             next_msg = self.streams.upstream.get_nowait()
-            self.udp_conn.sock.sendto(next_msg, self.udp_conn.dst_addr)
+            self.udp_mcast.multicast(next_msg, dst=True)

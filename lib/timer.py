@@ -33,7 +33,7 @@ class Timer(object):
         time.sleep(5)   # for setup
         next_call = time.time()
         while True:
-            self.logger.debug('%s' % datetime.datetime.now())
+            self.logger.debug('timer: %s' % datetime.datetime.now())
             next_call = next_call + 1;
             self.count = (self.count + 1) % 3
             self.time_up = True

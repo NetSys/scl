@@ -33,50 +33,57 @@ def parseheader(msg):
           ord(msg[offset+3]) << 8 | ord(msg[offset+4])
     return type, seq, msg[offset+5:]
 
-def link_state_pack(port, state, version):
+def link_state_pack(intf, port_no, state, version):
     msg = ''
-    port = str(port)
-    if len(port) > OFP_MAX_PORT_NAME_LEN:
-        msg = port[0: OFP_MAX_PORT_NAME_LEN]
-    for i in range(0, OFP_MAX_PORT_NAME_LEN - len(port)):
-        msg = msg + '\0'
-    msg = msg + port
+    intf = str(intf)
+    if len(intf) > OFP_MAX_PORT_NAME_LEN:
+        msg = intf[0: OFP_MAX_PORT_NAME_LEN]
+    else:
+        for i in range(0, OFP_MAX_PORT_NAME_LEN - len(intf)):
+            msg = msg + '\0'
+        msg = msg + intf
+    msg = msg + struct.pack('!H', port_no)
     msg = msg + struct.pack('!I', state)
     msg = msg + struct.pack('!I', version)
     return msg
 
 def link_state_unpack(msg):
-    port = ''
+    intf = ''
     for i in range(0, OFP_MAX_PORT_NAME_LEN):
-        port = port + msg[i]
-    port = port.split(b"\x00")
-    port = port[len(port) - 1]
+        intf = intf + msg[i]
+    intf = intf.split(b"\x00")
+    intf = intf[-1]
     offset = OFP_MAX_PORT_NAME_LEN
+    port_no = ord(msg[offset]) << 8 | ord(msg[offset+1])
+    offset = offset + 2
     state = ord(msg[offset]) << 24 | ord(msg[offset+1]) << 16 |\
             ord(msg[offset+2]) << 8 | ord(msg[offset+3])
     offset = offset + 4
     version = ord(msg[offset]) << 24 | ord(msg[offset+1]) << 16 |\
               ord(msg[offset+2]) << 8 | ord(msg[offset+3])
-    return port, state, version
+    return intf, port_no, state, version
 
 
 class SwitchLinkEvents(object):
     def __init__(self):
         self.events = {}
-        self.version = {}
+        self.versions = {}
         self.states = {}
+        self.port_nos = {}
 
-    def update(self, port, state):
-        if port not in self.events:
-            self.events[port] = of.xid_generator()
-        self.version[port] = self.events[port]()
-        self.states[port] = state
-        return link_state_pack(port, state, self.version[port])
+    def update(self, intf, port_no, state):
+        if intf not in self.events:
+            self.events[intf] = of.xid_generator()
+        self.versions[intf] = self.events[intf]()
+        self.states[intf] = state
+        self.port_nos[intf] = port_no
+        return link_state_pack(intf, port_no, state, self.versions[intf])
 
     def current_events(self):
         msgs = []
-        for port in self.events:
+        for intf in self.events:
             msgs.append(
                 link_state_pack(
-                port, self.states[port], self.version[port]))
+                intf, self.port_nos[intf],
+                self.states[intf], self.versions[intf]))
         return msgs

@@ -11,6 +11,10 @@ def int2ip(addr):
 def id2str(conn_id):
     return int2ip(conn_id >> 16) + ':' + str(conn_id % (1 << 16))
 
+def str2id(switch):
+    ip, port = switch.split(':')
+    return (ip2int(ip) << 16) + int(port)
+
 class UdpConn(object):
     '''
     For scl on the switch side, connect to scl on the controller side
@@ -34,11 +38,14 @@ class UdpMcastListener(object):
     '''
     For scl on the controller side, listening the multicast group
     '''
-    def __init__(self, mcast_grp, mcast_port, mcast_intf=None):
+    def __init__(self, src_mcast_grp, src_mcast_port, mcast_intf=None,
+            dst_mcast_grp=None, dst_mcast_port=None):
         self.sock = None
-        self.src_grp = mcast_grp
-        self.src_port = mcast_port
+        self.src_grp = src_mcast_grp
+        self.src_port = src_mcast_port
         self.intf = mcast_intf              # which interface to listen at
+        self.dst_grp = dst_mcast_grp
+        self.dst_port = dst_mcast_port
         if self.intf is None:                    # None means all interfaces
             self.intf = socket.INADDR_ANY
         self.dst_addr = {}
@@ -63,12 +70,18 @@ class UdpMcastListener(object):
         self.dst_addr[addr_id] = addr
         return data, addr_id
 
-    def sendto(self, msg, addr_id):
+    def send_to_id(self, msg, addr_id):
         self.sock.sendto(msg, self.dst_addr[addr_id])
 
-    def multicast(self, msg):
+    def send_to_addr(self, msg, addr, port):
+        self.sock.sendto(msg, (addr, port))
+
+    def multicast(self, msg, dst=False):
         # route add -host self.src_grp dev self.intf
-        self.sock.sendto(msg, (self.src_grp, self.src_port))
+        if not dst:
+            self.sock.sendto(msg, (self.src_grp, self.src_port))
+        else:
+            self.sock.sendto(msg, (self.dst_grp, self.dst_port))
 
 class TcpConn(object):
     '''

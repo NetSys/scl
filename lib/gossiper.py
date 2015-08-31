@@ -2,7 +2,7 @@ import socket
 import random
 import json
 from socket_utils import *
-from const import RECV_BUF_SIZE
+from conf.const import RECV_BUF_SIZE
 
 
 def byteify(input):
@@ -22,30 +22,45 @@ def byteify(input):
 class LinkLog(object):
     def __init__(self, host_id, hosts_num):
         self.log = {}
+        self.last_events = {}
         self.peer_num = int(hosts_num) - 1     # not self
 
     def switches(self):
         return self.log.keys()
 
+    def links(self, switch):
+        return self.log[switch].keys()
+
     def open(self, switch):
+        '''
+        maybe useless, update method will create the switch key
+        '''
         if switch not in self.log:
             self.log[switch] = {}
+            self.last_events[switch] = {}
 
     def delete(self, switch):
         if switch in self.log:
             del self.log[switch]
 
     def update(self, switch, link, event, state, peer=None):
+        upcall_link_status = False
         if switch not in self.log:
             self.log[switch] = {}
+            self.last_events[switch] = {}
         if link not in self.log[switch]:
             self.log[switch][link] = {}
+            self.last_events[switch][link] = -1
         if event not in self.log[switch][link]:
+            if event > self.last_events[switch][link]:
+                self.last_events[switch][link] = event
+                upcall_link_status = True
             self.log[switch][link][event] = {}
             self.log[switch][link][event]['state'] = state
             self.log[switch][link][event]['peers'] = {}
         if peer is not None:
             self.log[switch][link][event]['peers'][peer] = True
+        return (switch, link, state) if upcall_link_status else None
 
     def digest(self):
         '''
@@ -124,15 +139,20 @@ class LinkLog(object):
 class Gossiper(object):
     def __init__(
             self, scl_gossip_mcast_grp, scl_gossip_mcast_port, scl_gossip_intf,
-            host_id, timer, streams, logger):
+            scl2ctrl, host_id, timer, streams, logger):
         self.udp_mcast = UdpMcastListener(
                 scl_gossip_mcast_grp, scl_gossip_mcast_port, scl_gossip_intf)
         self.udp_mcast.open()
+        self.scl2ctrl = scl2ctrl
         self.timer = timer
+        self.streams = streams
         self.link_log = streams.link_log
         self.logger = logger
 
     def _open(self, host_id, peer_lists):
+        '''
+        deprecated
+        '''
         self.sock = socket.socket(
                 socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self.sock.setblocking(0)            # non-blocking
@@ -164,7 +184,7 @@ class Gossiper(object):
             self.logger.debug(
                     "send ack to %s, delta: %s" % (
                         addr, json.dumps(delta)))
-            self.udp_mcast.sendto(json.dumps(
+            self.udp_mcast.send_to_id(json.dumps(
                 {'type': 'ack', 'delta': delta}), addr_id)
 
     def _handle_ack(self, data, addr_id):
@@ -176,7 +196,14 @@ class Gossiper(object):
             for link in data['delta'][switch]:
                 for event, items in data['delta'][switch][link].iteritems():
                     event = int(event)
-                    self.link_log.update(switch, link, event, items['state'], addr)
+                    if switch not in self.link_log.switches():
+                        self.logger.info(
+                                'receive link msg of a new switch by gossiper, '
+                                'set up a new connection from proxy to controller')
+                        self.scl2ctrl.open(str2id(switch), 0)
+                    ret = self.link_log.update(switch, link, event, items['state'], addr)
+                    if ret:
+                        self.streams.upcall_link_status(ret[0], ret[1], ret[2])
                     for peer in items['peers']:
                         self.link_log.update(switch, link, event, items['state'], peer)
 

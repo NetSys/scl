@@ -1,6 +1,6 @@
 import json
 import socket
-from const import RECV_BUF_SIZE
+from conf.const import RECV_BUF_SIZE
 
 # ovsdb json rpc
 bridge_query = {

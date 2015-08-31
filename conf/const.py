@@ -1,6 +1,9 @@
 # scl tcp listening address
 scl_agent_serv_host = '127.0.0.1'
 scl_agent_serv_port = 6633
+scl_agent_mcast_grp = '224.1.1.3'
+scl_agent_mcast_port = 6666
+scl_agent_intf = '192.168.1.100'      # depends on host
 
 # scl udp mcast group
 scl_proxy_mcast_grp = '224.1.1.1'
