@@ -311,6 +311,8 @@ class Scl2Ctrl(object):
                         self.clean_connection(conn.sock, conn.conn_id)
                     else:
                         echo_rqst = of.ofp_echo_request()
+                        # FIXME: may receive disordered xid, temp method: set xid 0
+                        echo_rqst.xid = 0
                         conn.send(echo_rqst.pack())
                         self.streams.ofp_echo_ids[conn.conn_id] = echo_rqst.xid
                         self.streams.ofp_echo_times[conn.conn_id] += 1
@@ -401,5 +403,7 @@ class Scl2Scl(object):
         # (count + 1) % 3 per second
         # send link state request each three seconds
         if self.timer.time_up and self.timer.count == 1:
-            self.logger.debug('periodically broadcast link state rqst msg')
-            self.udp_mcast.multicast(scl.addheader('', scl.SCLT_LINK_RQST), dst=True)
+            # NOTE: switches upcall periodically
+            pass
+            #self.logger.debug('periodically broadcast link state rqst msg')
+            #self.udp_mcast.multicast(scl.addheader('', scl.SCLT_LINK_RQST), dst=True)

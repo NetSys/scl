@@ -123,7 +123,7 @@ class LinkLog(object):
 
     def truncate(self):
         '''
-        truncate tail, if all messages have beed seen by each others
+        truncate tail, if all messages have been seen by each others
         '''
         # TODO: how can host know that others have received its message?
         for switch in self.log:

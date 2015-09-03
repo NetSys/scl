@@ -232,11 +232,12 @@ class Scl2Sw(object):
 
 class Scl2Scl(object):
     def __init__(self, scl_agent_mcast_grp, scl_agent_mcast_port, scl_agent_intf,
-            scl_proxy_mcast_grp, scl_proxy_mcast_port, streams, logger):
+            scl_proxy_mcast_grp, scl_proxy_mcast_port, timer, streams, logger):
         self.udp_mcast = UdpMcastListener(
                 scl_agent_mcast_grp, scl_agent_mcast_port, scl_agent_intf,
                 scl_proxy_mcast_grp, scl_proxy_mcast_port)
         self.udp_mcast.open()
+        self.timer = timer
         self.streams = streams
         self.logger = logger
 
@@ -272,8 +273,10 @@ class Scl2Scl(object):
     def run(self, lists):
         # socket is readable
         if self.udp_mcast.sock in lists[0]:
+            self.logger.debug('udp_mcast listener socket is readable')
             data, addr = self.udp_mcast.sock.recvfrom(RECV_BUF_SIZE)
             if data:
+                self.logger.debug('udp_mcast listener received msg')
                 # deal with commands from scl proxies
                 scl_type, seq, data = scl.parseheader(data)
                 if scl_type is scl.SCLT_OF and not self.streams.sw_connected:
@@ -291,3 +294,9 @@ class Scl2Scl(object):
             self.logger.debug('broadcast msg to scl_proxy')
             next_msg = self.streams.upstream.get_nowait()
             self.udp_mcast.multicast(next_msg, dst=True)
+
+        # check timer
+        # (count + 1) % 3 per second
+        # send link state reply each three seconds
+        if self.timer.time_up and self.timer.count == 1:
+            self.hand_link_request()

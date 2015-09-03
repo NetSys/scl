@@ -4,6 +4,7 @@ import sys
 import logging
 from conf.const import *
 from lib.selector import Selector
+from lib.timer import Timer
 import lib.agent_channel as channel
 
 
@@ -21,16 +22,21 @@ logger = logging.getLogger(__name__)
 
 logger.debug('scl_agent_intf: %s' % scl_agent_intf)
 
+timer = Timer(logger)
 streams = channel.Streams()
 scl2scl = channel.Scl2Scl(
         scl_agent_mcast_grp, scl_agent_mcast_port, scl_agent_intf,
-        scl_proxy_mcast_grp, scl_proxy_mcast_port, streams, logger)
+        scl_proxy_mcast_grp, scl_proxy_mcast_port, timer, streams, logger)
 scl2sw = channel.Scl2Sw(scl_agent_serv_host, scl_agent_serv_port, streams, logger)
 selector = Selector()
 
+timer.start()   # another thread, daemonize
+
 while True:
+    timer.wait(selector)
     scl2scl.wait(selector)
     scl2sw.wait(selector)
     lists = selector.block()
+    timer.run(lists)
     scl2scl.run(lists)
     scl2sw.run(lists)

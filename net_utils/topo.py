@@ -1,4 +1,5 @@
 import json
+import networkx as nx
 from mininet.topo import Topo
 
 def topo2file(file_name, net, switches, hosts, ctrls):
@@ -18,6 +19,8 @@ def topo2file(file_name, net, switches, hosts, ctrls):
                 another_intf = intf.link.intf1\
                         if intf.link.intf1 is not intf else intf.link.intf2
                 another_sw_name = another_intf.name.split('-')[0]
+                if another_sw_name[0] == 'c':
+                    continue
                 another_sw = net.getNodeByName(another_sw_name)
                 another_port = another_sw.ports[another_intf] + 1
                 if intf is intf.link.intf1:
@@ -80,7 +83,7 @@ class FatTree(Topo):
                 for k in xrange(0, self.pod / 2):
                     self.addLink(self.aggr_list[i + j], self.edge_list[i + k], )
 
-        # edge <--> aggregation
+        # edge <--> host
         index = 0
         for edge in self.edge_list:
             for i in xrange(0, self.pod / 2):
@@ -91,3 +94,37 @@ class FatTree(Topo):
         self.createSwitches()
         self.createHosts()
         self.createLinks()
+
+
+class FatTreeOutBand(FatTree):
+    def __init__(self, pod, switches, hosts, ctrls):
+        super(FatTreeOutBand, self).__init__(pod, switches, hosts)
+        self.createControlSwitches()
+        self.createControlLinks(ctrls)
+
+    def createControlSwitches(self):
+        num = self.core_num + self.aggr_num + self.edge_num
+        for i in xrange(0, num):
+            sw = 'c' + str(i).zfill(3)          # 3: switch number length
+            sw_ip = '10.2.%s.1/8' % str(i)
+            self.addHost(sw, ip=sw_ip)
+
+    def createControlLinks(self, ctrls):
+        ctrl_hosts = [self.host_list[ctrl] for ctrl in ctrls]
+        for edge in self.g.edges():
+            host1, host2 = edge[0], edge[1]
+            if host1[0] == 's' and host2[0] == 's':
+                ctrl_sw1 = 'c' + host1[1:]
+                ctrl_sw2 = 'c' + host2[1:]
+                self.addLink(ctrl_sw1, ctrl_sw2, )
+            else:
+                if host1 in ctrl_hosts:
+                    ctrl_sw = 'c' + host2[1:]
+                    self.addLink(host1, ctrl_sw)
+                elif host2 in ctrl_hosts:
+                    ctrl_sw = 'c' + host1[1:]
+                    self.addLink(host2, ctrl_sw)
+
+        for switch in self.switch_list:
+            ctrl_sw = 'c' + switch[1:]
+            self.addLink(ctrl_sw, switch)
