@@ -52,8 +52,9 @@ class scl_routing(object):
         self.topo = None
         self.graph = nx.Graph()
         self.hosts = {}         # [host] --> host_ip
-        self.intf2link = {}     # [intf] --> link_obj
         self.sw2conn = {}       # [sw] --> connection
+        # [intf] --> link_obj
+        self.intf2link = defaultdict(lambda: None)
         # [sw1][sw2] --> link_obj
         self.sw2link = defaultdict(lambda: defaultdict(lambda: None))
         # [sw][host1][host2] --> link_obj
@@ -114,6 +115,9 @@ class scl_routing(object):
         log.debug("Switch %s portstatus upcall.", dpid_to_str(event.dpid))
         log.debug("     port: %s, state: %d" % (event.ofp.desc.name, event.ofp.desc.state))
         link = self.intf2link[event.ofp.desc.name]
+        if not link:
+            log.debug('control <---> data link intf')
+            return
         sw1, sw2 = link.sw1, link.sw2
         old_state = link.state1 if event.ofp.desc.name == link.intf1 else link.state2
         if event.ofp.desc.state != of.OFPPS_LINK_DOWN:
@@ -127,38 +131,42 @@ class scl_routing(object):
                 link.state1 = event.ofp.desc.state
                 if link.state2 != of.OFPPS_LINK_DOWN:
                     # both ends of the link are up, update route
-                    log.debug("add edge %s %s" % (sw1, sw2))
+                    log.debug("both ends of the link are up, add edge %s %s" % (sw1, sw2))
                     self.graph.add_edge(sw1, sw2)
                     self.update_flow_tables(self._calculate_route())
                 else:
+                    log.debug('one end of the link is up, wait for the other end')
                     return
             else:
                 link.state2 = event.ofp.desc.state
                 if link.state1 != of.OFPPS_LINK_DOWN:
                     # both ends of the link are up, update route
-                    log.debug("add edge %s %s" % (sw1, sw2))
+                    log.debug("both ends of the link are up, add edge %s %s" % (sw1, sw2))
                     self.graph.add_edge(sw1, sw2)
                     self.update_flow_tables(self._calculate_route())
                 else:
+                    log.debug('one end of the link is up, wait for the other end')
                     return
         else:
             if event.ofp.desc.name == link.intf1:
                 link.state1 = event.ofp.desc.state
                 if link.state2 != of.OFPPS_LINK_DOWN:
                     # an end of the link is down, update route
-                    log.debug("remove edge %s %s" % (sw1, sw2))
+                    log.debug("one end of the link is down, remove edge %s %s" % (sw1, sw2))
                     self.graph.remove_edge(sw1, sw2)
                     self.update_flow_tables(self._calculate_route())
                 else:
+                    log.debug('both ends of the link are down')
                     return
             else:
                 link.state2 = event.ofp.desc.state
                 if link.state1 != of.OFPPS_LINK_DOWN:
                     # an end of the link is down, update route
-                    log.debug("remove edge %s %s" % (sw1, sw2))
+                    log.debug("one end of the link is down, remove edge %s %s" % (sw1, sw2))
                     self.graph.remove_edge(sw1, sw2)
                     self.update_flow_tables(self._calculate_route())
                 else:
+                    log.debug('both ends of the link are down')
                     return
 
     def _calculate_route(self):

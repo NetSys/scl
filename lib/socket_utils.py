@@ -1,5 +1,6 @@
 import socket
 import struct
+from collections import defaultdict
 
 
 def ip2int(addr):
@@ -48,7 +49,7 @@ class UdpMcastListener(object):
         self.dst_port = dst_mcast_port
         if self.intf is None:                    # None means all interfaces
             self.intf = socket.INADDR_ANY
-        self.dst_addr = {}
+        self.dst_addr = defaultdict(lambda: None)
 
     def open(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -71,6 +72,10 @@ class UdpMcastListener(object):
         return data, addr_id
 
     def send_to_id(self, msg, addr_id):
+        if not self.dst_addr[addr_id]:
+            ip, port = id2str(addr_id).split(':')
+            addr = (ip, int(port))
+            self.dst_addr[addr_id] = addr
         self.sock.sendto(msg, self.dst_addr[addr_id])
 
     def send_to_addr(self, msg, addr, port):
