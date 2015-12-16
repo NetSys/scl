@@ -19,7 +19,7 @@ def topo2file(file_name, net, switches, hosts, ctrls):
                 another_intf = intf.link.intf1\
                         if intf.link.intf1 is not intf else intf.link.intf2
                 another_sw_name = another_intf.name.split('-')[0]
-                if another_sw_name[0] == 'c':
+                if another_sw_name[0] == 'c' or another_sw_name in data['ctrls']:
                     continue
                 another_sw = net.getNodeByName(another_sw_name)
                 another_port = another_sw.ports[another_intf] + 1

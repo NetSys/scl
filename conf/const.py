@@ -15,6 +15,8 @@ ctrl_port = 6633
 
 # recv buf size
 RECV_BUF_SIZE = 4096
+# version number window
+WINDOW = 1 << 31
 
 # ovsdb unix path
 OVSDB = '/var/run/openvswitch/db.sock'

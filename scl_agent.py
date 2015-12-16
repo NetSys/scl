@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 logger.debug('scl_agent_intf: %s' % scl_agent_intf)
 
 timer = Timer(logger)
-streams = channel.Streams()
+streams = channel.Streams(logger)
 scl2scl = channel.Scl2Scl(
         scl_agent_mcast_grp, scl_agent_mcast_port, scl_agent_intf,
         scl_proxy_mcast_grp, scl_proxy_mcast_port, timer, streams, logger)

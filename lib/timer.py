@@ -12,7 +12,8 @@ class Timer(object):
         r, w = os.pipe()
         self.listen_fd = r
         self.send_fd = w
-        self.count = 0
+        self.link_state_rqst_count = 0
+        self.flow_table_rqst_count = 0
         self.time_up = False
         self.timer_thread = threading.Thread(target=self.timer)
         self.timer_thread.daemon = True
@@ -35,7 +36,8 @@ class Timer(object):
         while True:
             self.logger.debug('timer: %s' % datetime.datetime.now())
             next_call = next_call + 1;
-            self.count = (self.count + 1) % 3
+            self.link_state_rqst_count = (self.link_state_rqst_count + 1) % 3
+            self.flow_table_rqst_count = (self.flow_table_rqst_count + 1) % 5
             self.time_up = True
             os.write(self.send_fd, 'x')
             time.sleep(next_call - time.time())

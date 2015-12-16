@@ -24,7 +24,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 timer = Timer(logger)
-streams = scl.Streams(host_id, hosts_num)
+streams = scl.Streams(host_id, hosts_num, logger)
 scl2ctrl = scl.Scl2Ctrl(ctrl_host, ctrl_port, timer, streams, logger)
 scl2scl = scl.Scl2Scl(
         scl_proxy_mcast_grp, scl_proxy_mcast_port, scl_proxy_intf,

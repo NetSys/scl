@@ -1,8 +1,11 @@
 import socket
+import struct
 import random
 import json
+import libopenflow_01 as of
 from socket_utils import *
-from conf.const import RECV_BUF_SIZE
+from conf.const import RECV_BUF_SIZE, WINDOW
+from collections import defaultdict
 
 
 def byteify(input):
@@ -136,6 +139,9 @@ class LinkLog(object):
                         break
 
 
+gossiper_seq = of.xid_generator()
+HEADER_SIZE = 6
+
 class Gossiper(object):
     def __init__(
             self, scl_gossip_mcast_grp, scl_gossip_mcast_port, scl_gossip_intf,
@@ -148,6 +154,9 @@ class Gossiper(object):
         self.streams = streams
         self.link_log = streams.link_log
         self.logger = logger
+        self.buffs = defaultdict(lambda: defaultdict(lambda: None))
+        self.version = defaultdict(lambda: None)
+        self.msgs_num = defaultdict(lambda: 0)
 
     def _open(self, host_id, peer_lists):
         '''
@@ -184,8 +193,7 @@ class Gossiper(object):
             self.logger.debug(
                     "send ack to %s, delta: %s" % (
                         addr, json.dumps(delta)))
-            self.udp_mcast.send_to_id(json.dumps(
-                {'type': 'ack', 'delta': delta}), addr_id)
+            self.send(json.dumps({'type': 'ack', 'delta': delta}), addr_id)
 
     def _handle_ack(self, data, addr_id):
         addr = id2str(addr_id)
@@ -205,7 +213,94 @@ class Gossiper(object):
                     if ret:
                         self.streams.upcall_link_status(ret[0], ret[1], ret[2])
                     for peer in items['peers']:
-                        self.link_log.update(switch, link, event, items['state'], peer)
+                        self.link_log.update(switch , link, event, items['state'], peer)
+
+    def _add_header(self, data, ver, idx, num):
+        data = struct.pack('!I', ver) + struct.pack('!B', idx) +\
+               struct.pack('!B', num) + data
+        return data
+
+    def _parse_data(self, data, addr_id):
+        offset = 0
+        data_length = len(data)
+        self.buff += data
+        buff_length = len(self.buff)
+        while buff_length - offset >= 2:
+            msg_length = ord(self.buff[offset]) << 8 | ord(self.buff[offset + 1])
+            if buff_length - offset < msg_length:
+                break
+            msg = self.buff[offset + 2: offset + msg_length]
+            self._handle_msg(byteify(json.loads(msg)), addr_id)
+            offset = offset + msg_length
+        self.buff = self.buff[offset:]
+
+    def _parse_data(self, data):
+        ver = ord(data[0]) << 24 + ord(data[1]) << 16 + ord(data[2]) << 8 + ord(data[3])
+        idx = ord(data[4])
+        num = ord(data[5])
+        msg = data[6:]
+        return ver, idx, num, msg
+
+    def send(self, data, addr=None):
+        msgs = []
+        max_msg_length = RECV_BUF_SIZE - HEADER_SIZE
+        while len(data) > max_msg_length:
+            msgs.append(data[0: max_msg_length])
+            data = data[max_msg_length:]
+        msgs.append(data)
+        msgs_num = len(msgs)
+        version = gossiper_seq()
+        for i in xrange(0, msgs_num):
+            msgs[i] = self._add_header(msgs[i], version, i, msgs_num)
+            if addr:
+                self.udp_mcast.send_to_id(msgs[i], addr)
+            else:
+                self.udp_mcast.multicast(msgs[i])
+
+    def _check_completeness(self, addr_id):
+        if len(self.buffs[addr_id]) == self.msgs_num[addr_id]:
+            complete_msg = ''
+            for i in xrange(0, self.msgs_num[addr_id]):
+                complete_msg += self.buffs[addr_id][i]
+            self._handle_msg(byteify(json.loads(complete_msg)), addr_id)
+            del self.version[addr_id]
+            del self.msgs_num[addr_id]
+            del self.buffs[addr_id]
+
+    def recv(self):
+        data, addr_id = self.udp_mcast.recvfrom(RECV_BUF_SIZE)
+        version, index, num, msg = self._parse_data(data)
+        if not self.version[addr_id]:
+            # new version, last msg has been processed
+            self.version[addr_id] = version
+            self.msgs_num[addr_id] = num
+            self.buffs[addr_id][index] = msg
+            self._check_completeness(addr_id)
+        else:
+            if version == self.version[addr_id]:
+                # the same version, last msg to be processed
+                if self.msgs_num[addr_id] != num:
+                    self.logger.error("msgs in the same version (%d) have different msg num" % version)
+                    del self.version[addr_id]
+                    del self.msgs_num[addr_id]
+                    del self.buffs[addr_id]
+                else:
+                    self.buffs[addr_id][index] = msg
+                    self._check_completeness(addr_id)
+            elif (version > self.version[addr_id] and version - self.version[addr_id] < WINDOW) or\
+                 (version < self.version[addr_id] and self.version[addr_id] - version > WINDOW):
+                # new version is larger that current one
+                # and not a new cycle (current version is not small enough)
+                # or
+                # new version is smaller that current one
+                # and a new cycle begins (new version is small enough)
+                # then
+                # discard current states, and update msg version and msg
+                self.version[addr_id] = version
+                self.msgs_num[addr_id] = num
+                del self.buff[addr_id]
+                self.buffs[addr_id][index] = msg
+                self._check_completeness(addr_id)
 
     def wait(self, selector):
         selector.wait([self.udp_mcast.sock], [])
@@ -214,13 +309,11 @@ class Gossiper(object):
         # socket is readable
         if self.udp_mcast.sock in lists[0]:
             self.logger.info("current link log: %s" % json.dumps(self.link_log.log))
-            data, addr_id = self.udp_mcast.recvfrom(RECV_BUF_SIZE)
-            self._handle_msg(byteify(json.loads(data)), addr_id)
+            self.recv()
 
         # check timer, time up per second
         if self.timer.time_up:
             self.logger.debug(
                     "broadcast syn, digest: %s" % (
                         json.dumps(self.link_log.digest())))
-            self.udp_mcast.multicast(json.dumps({
-                'type': 'syn', 'digest': self.link_log.digest()}))
+            self.send(json.dumps({'type': 'syn', 'digest': self.link_log.digest()}))

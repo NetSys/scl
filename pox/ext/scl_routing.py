@@ -38,6 +38,7 @@ class Link(object):
         self.port2 = port2
         self.sw2 = intf2.split('-')[0]
         self.state2 = state2
+        # default host link state is up
         if self.sw1[0] == 'h':
             self.state1 = of.OFPPS_STP_FORWARD
         if self.sw2[0] == 'h':
@@ -59,6 +60,9 @@ class scl_routing(object):
         self.sw2link = defaultdict(lambda: defaultdict(lambda: None))
         # [sw][host1][host2] --> link_obj
         self.sw_tables = defaultdict(
+                lambda: defaultdict(lambda: defaultdict(lambda: None)))
+        # [sw][host1][host2] --> update_status
+        self.sw_tables_status = defaultdict(
                 lambda: defaultdict(lambda: defaultdict(lambda: None)))
         self.load_topo(name)
         core.openflow.addListeners(self)
@@ -172,7 +176,7 @@ class scl_routing(object):
     def _calculate_route(self):
         log.debug("calculate routing...")
         log.debug("edges, num %d: %s", len(self.graph.edges()), json.dumps(self.graph.edges()))
-        updates = defaultdict(lambda: [])
+        updates = {'modify': defaultdict(lambda: []), 'delete' : defaultdict(lambda: [])}
         current = 0
         for host1 in self.hosts:
             for host2 in self.hosts:
@@ -184,38 +188,65 @@ class scl_routing(object):
                     continue
                 path = paths[current % len(paths)]
                 current += 1
-                log.debug('calculate path: %s' % json.dumps(path))
+                log.debug('calculated path: %s' % json.dumps(path))
                 path = zip(path, path[1:])
                 for (a, b) in path[1:]:
                     link = self.sw2link[a][b]
                     if self.sw_tables[a][host1][host2] != link:
                         self.sw_tables[a][host1][host2] = link
-                        updates[a].append((host1, host2, link))
+                        updates['modify'][a].append((host1, host2, link))
+                        self.sw_tables_status[a][host1][host2] = 'updated'
+                    else:
+                        self.sw_tables_status[a][host1][host2] = 'checked'
+        for sw in self.sw_tables_status.keys():
+            for host1 in self.sw_tables_status[sw].keys():
+                for host2 in self.sw_tables_status[sw][host1].keys():
+                    if self.sw_tables_status[sw][host1][host2] is not 'updated' and\
+                       self.sw_tables_status[sw][host1][host2] is not 'checked':
+                        updates['delete'][sw].append((
+                            host1, host2, self.sw_tables[sw][host1][host2]))
+                        del self.sw_tables[sw][host1][host2]
+                        del self.sw_tables_status[sw][host1][host2]
+                    else:
+                        self.sw_tables_status[sw][host1][host2] = 'to_be_deleted'
         return updates
 
+    def update_flow_entry(self, sw_name, host1, host2, link, cmd):
+        nw_src = self.hosts[host1]
+        nw_dst = self.hosts[host2]
+        # types of sw_name and link.sw1 are different, use == not is
+        if sw_name == link.sw1:
+            log.debug(
+                    'host1 %s --> host2 %s; link: %s %s %d --> %s %s %d' % (
+                        nw_src, nw_dst, link.sw1, link.intf1, link.port1, link.sw2, link.intf2, link.port2))
+            outport = link.port1
+        else:
+            log.debug(
+                    'host1 %s --> host2 %s; link: %s %s %d --> %s %s %d' % (
+                        nw_src, nw_dst, link.sw2, link.intf2, link.port2, link.sw1, link.intf1, link.port1))
+            outport = link.port2
+        msg = of.ofp_flow_mod(command = cmd)
+        msg.match.dl_type = 0x800
+        msg.match.nw_src = IPAddr(nw_src)
+        msg.match.nw_dst = IPAddr(nw_dst)
+        msg.priority = 50000    # hard code
+        msg.actions.append(of.ofp_action_output(port = outport))
+        self.sw2conn[sw_name].send(msg.pack())
+
     def update_flow_tables(self, updates):
-        if not updates:
+        if not updates['modify'] and not updates['delete']:
             return
         log.debug("update flow tables")
-        for sw_name, flow_entries in updates.iteritems():
-            log.debug('sw_name: %s' % sw_name)
+
+        for sw_name, flow_entries in updates['modify'].iteritems():
+            log.debug('modify sw flow_entries: %s' % sw_name)
             for host1, host2, link in flow_entries:
-                nw_src = self.hosts[host1]
-                nw_dst = self.hosts[host2]
-                # types of sw_name and link.sw1 are different
-                if sw_name == link.sw1:
-                    log.debug('sw_name %s is 1: link: %s %s %d --> %s %s %d' % (sw_name, link.sw1, link.intf1, link.port1, link.sw2, link.intf2, link.port2))
-                    outport = link.port1
-                else:
-                    log.debug('sw_name %s is 2: link: %s %s %d --> %s %s %d' % (sw_name, link.sw2, link.intf2, link.port2, link.sw1, link.intf1, link.port1))
-                    outport = link.port2
-                msg = of.ofp_flow_mod(command = of.OFPFC_ADD)
-                msg.match.dl_type = 0x800
-                msg.match.nw_src = IPAddr(nw_src)
-                msg.match.nw_dst = IPAddr(nw_dst)
-                msg.priority = 50000    # hard code
-                msg.actions.append(of.ofp_action_output(port = outport))
-                self.sw2conn[sw_name].send(msg.pack())
+                self.update_flow_entry(sw_name, host1, host2, link, of.OFPFC_MODIFY)
+
+        for sw_name, flow_entries in updates['delete'].iteritems():
+            log.debug('delete sw flow_entries: %s' % sw_name)
+            for host1, host2, link in flow_entries:
+                self.update_flow_entry(sw_name, host1, host2, link, of.OFPFC_DELETE)
 
 
 def launch(name=None):

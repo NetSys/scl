@@ -77,7 +77,7 @@ def handle_ERROR_MSG(scl2sw, msg):
     scl2sw.logger.info('ofp_error: %s' % msg.show())
 
     # deal with barrier corner case
-    if msg.xid != scl2sw.streams.barrier.xid: return
+    if msg.xid != scl2sw.streams.barrier_xid: return
     if msg.ofp.type != of.OFPET_BAD_REQUEST: return
     if msg.ofp.code != of.OFPBRC_BAD_TYPE: return
     # Okay, so this is probably an HP switch that doesn't support barriers
@@ -119,10 +119,13 @@ def _set_handlers ():
 
 
 class Streams(object):
-    def __init__(self):
+    def __init__(self, logger):
         self.upstream = Queue.Queue()
         self.downstream = Queue.Queue()
         self.link_events = scl.SwitchLinkEvents()
+        self.flow_table = scl.FlowTable(logger)
+        self.scl2scl_buff = ''
+        self.sw_ofp_buff = ''
         self.sw_connected = False
         self.last_of_seq = -1
         self.sw_features = None
@@ -146,48 +149,59 @@ class Scl2Sw(object):
         '''
         offset = 0
         data_length = len(data)
-        self.logger.debug('data_length: %d' % data_length)
-        # parse multiple msgs in data
-        while data_length - offset >= 8:
-            ofp_type = ord(data[offset + 1])
+        tmp_buff = self.streams.sw_ofp_buff
+        tmp_buff += data
+        buff_length = len(data)
+        self.logger.debug(
+                'data_length: %d, buff_length: %d.' % (data_length, buff_length))
+        # parse multiple msgs in buff
+        while buff_length - offset >= 8:
+            ofp_type = ord(tmp_buff[offset + 1])
+
+            # ofp msg length checking
+            # assume that 2nd and 3rd bytes are for length
+            msg_length = ord(tmp_buff[offset + 2]) << 8 | ord(tmp_buff[offset + 3])
+            if buff_length - offset < msg_length:
+                break
 
             # ofp version checking
-            if ord(data[offset]) != of.OFP_VERSION:
+            if ord(tmp_buff[offset]) != of.OFP_VERSION:
                 if ofp_type == of.OFPT_HELLO:
                     pass    # wait for switches to be timeout
                 else:
                     self.logger.warn(
-                            'Bad OpenFlow version (0x%02x)' % ord(data[offset]))
-                    break
+                            'Bad OpenFlow version (0x%02x)' % ord(tmp_buff[offset]))
+                    offset = offset + msg_length
+                    continue
 
-            # ofp msg length checking
-            msg_length = ord(data[offset + 2]) << 8 | ord(data[offset + 3])
-            if msg_length is 0 or data_length - offset < msg_length:
-                self.logger.error('msg_length: %d, buffer error' % msg_length)
-                break
             self.logger.debug('ofp_type: %d, msg_length: %d' % (ofp_type, msg_length))
 
             # unpack msg according to ofp_type
-            new_offset, msg = unpackers[ofp_type](data, offset)
+            new_offset, msg = unpackers[ofp_type](tmp_buff, offset)
             assert new_offset - offset == msg_length
             offset = new_offset
 
             # handle ofp msg
-            try:
-                h = handlers[ofp_type]
-                h(self, msg)
-            except Exception, e:
-                self.logger.error(
-                        "Exception while handling OpenFlow %s msg, err: %s" % (ofp_type, e))
+            #try:
+            h = handlers[ofp_type]
+            h(self, msg)
+            #except Exception, e:
+            #    self.logger.error(
+            #            "Exception while handling OpenFlow %s msg, err: %s" % (ofp_type, e))
+
+        # save the uncomplete buffer
+        self.streams.sw_ofp_buff = tmp_buff[offset:]
 
     def client_close(self):
         self.tcp_client = None
         self.streams.downstream.queue.clear()
         self.streams.last_of_seq = -1
+        self.streams.sw_ofp_buff = ''
         self.streams.sw_connected = False
         self.streams.sw_features = None
         self.streams.barrier_xid = 0
         self.streams.datapath_id = None
+        self.streams.flow_table.reset()
 
     def wait(self, selector):
         if not self.tcp_client:
@@ -241,28 +255,58 @@ class Scl2Scl(object):
         self.streams = streams
         self.logger = logger
 
-    def hand_link_request(self):
+    def handle_flow_table_request(self):
+        for msg in self.streams.flow_table.current_flow_entries():
+            self.streams.upstream.put(scl.addheader(msg, scl.SCLT_FLOW_TABLE_NOTIFY))
+
+    def handle_link_request(self):
         for msg in self.streams.link_events.current_events():
             self.streams.upstream.put(scl.addheader(msg, scl.SCLT_LINK_NOTIFY))
 
     def handle_of_msg(self, data):
         '''
-        parse of openflow messages
+        parse ofp_flow_mod messages
         put data into downstream
         '''
         offset = 0
         data_length = len(data)
-        self.logger.debug('data_length: %d' % data_length)
-        # parse multiple of msgs in one data
-        while data_length - offset >= 8:
-            of_type = ord(data[offset + 1])
-            msg_length = ord(data[offset + 2]) << 8 | ord(data[offset + 3])
-            if msg_length is 0 or data_length - offset < msg_length:
-                self.logger.error('msg_length: %d, buffer error' % msg_length)
+        tmp_buff = self.streams.scl2scl_buff
+        tmp_buff += data
+        buff_length = len(data)
+        self.logger.debug(
+                'data_length: %d, buff_length: %d.' % (data_length, buff_length))
+        # parse multiple msgs in buff
+        while buff_length - offset >= 8:
+            ofp_type = ord(tmp_buff[offset + 1])
+
+            # ofp msg length checking
+            # assume that 2nd and 3rd bytes are for length
+            msg_length = ord(tmp_buff[offset + 2]) << 8 | ord(tmp_buff[offset + 3])
+            if buff_length - offset < msg_length:
                 break
-            self.logger.debug('of_type: %d, msg_length: %d' % (of_type, msg_length))
-            self.streams.downstream.put(data[offset: offset + msg_length])
-            offset = offset + msg_length
+
+            # ofp version checking
+            if ord(tmp_buff[offset]) != of.OFP_VERSION:
+                self.logger.warn(
+                        'Bad OpenFlow version (0x%02x)' % ord(tmp_buff[offset]))
+                offset = offset + msg_length
+                continue
+
+            self.logger.debug('ofp_type: %d, msg_length: %d' % (ofp_type, msg_length))
+
+            self.streams.downstream.put(tmp_buff[offset: offset + msg_length])
+
+            # handle_FLOW_MOD
+            if ofp_type == of.OFPT_FLOW_MOD:
+                new_offset, msg = unpackers[ofp_type](tmp_buff, offset)
+                assert new_offset - offset == msg_length
+                offset = new_offset
+                self.streams.flow_table.update(msg)
+            else:
+                offset += msg_length
+
+        # save the uncomplete buffer
+        self.streams.scl2scl_buff = tmp_buff[offset:]
 
     def wait(self, selector):
         if not self.streams.upstream.empty():
@@ -287,16 +331,13 @@ class Scl2Scl(object):
                     self.handle_of_msg(data)
                 elif scl_type is scl.SCLT_LINK_RQST:
                     self.logger.debug('receive sclt_link_rqst msg from scl_proxy %s' % addr[0])
-                    self.hand_link_request()
+                    self.handle_link_request()
+                elif scl_type is scl.SCLT_FLOW_TABLE_RQST:
+                    self.logger.debug('receive sclt_flow_table_rqst msg from scl_proxy %s' % addr[0])
+                    self.handle_flow_table_request()
 
         # socket is writeable
         if self.udp_mcast.sock in lists[1]:
             self.logger.debug('broadcast msg to scl_proxy')
             next_msg = self.streams.upstream.get_nowait()
             self.udp_mcast.multicast(next_msg, dst=True)
-
-        # check timer
-        # (count + 1) % 3 per second
-        # send link state reply each three seconds
-        if self.timer.time_up and self.timer.count == 1:
-            self.hand_link_request()

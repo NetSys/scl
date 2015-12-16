@@ -60,11 +60,12 @@ def handle_SET_CONFIG(scl, conn, msg):
     pass
 
 def handle_FLOW_MOD(scl2ctrl, conn, msg):
-    # FIXME: to reply packet_in, right?
     if scl2ctrl.streams.ofp_connected[conn.conn_id]:
         # add scl header to msg, put it into downstreams
         scl2ctrl.streams.downstreams[conn.conn_id].put(
             scl.addheader(msg.pack(), scl.SCLT_OF))
+        # maintain the whole dataplane flow tables
+        scl2ctrl.streams.flow_table_db.ofp_msg_update(conn.conn_id, msg)
 
 def handle_BARRIER_REQUEST(scl, conn, msg):
     reply = msg
@@ -106,15 +107,17 @@ class Streams(object):
     '''
     data received or to be sent
     '''
-    def __init__(self, host_id, hosts_num):
+    def __init__(self, host_id, hosts_num, logger):
         self.upstreams = {}         # conn_id: data_to_be_sent_to_controller
         self.downstreams = {}       # conn_id: data_to_be_sent_to_scl_agent
         self.last_of_seqs = {}      # conn_id: last_connection_sequence_num
-        self.handshake_queues = {}  # store temp switch msgs while of handshake
+        self.handshake_queues = {}  # temp switch msgs while proxy handshaking with ctrls
+        self.ofp_buffs = {}         # buffer uncomplete ctrls ofp msgs read from sockets
         self.ofp_connected = {}
         self.ofp_echo_times = {}
         self.ofp_echo_ids = {}
         self.link_log = LinkLog(host_id, hosts_num)
+        self.flow_table_db = scl.FlowTableDB(logger)
 
     def downstreams_empty(self):
         for k in self.downstreams:
@@ -139,20 +142,24 @@ class Streams(object):
         self.downstreams[conn_id] = Queue.Queue()
         self.last_of_seqs[conn_id] = of_seq
         self.handshake_queues[conn_id] = Queue.Queue()
+        self.ofp_buffs[conn_id] = ''
         self.ofp_connected[conn_id] = False
         self.ofp_echo_ids[conn_id] = 0
         self.ofp_echo_times[conn_id] = 0
         self.link_log.open(id2str(conn_id))
+        self.flow_table_db.open(conn_id)
 
     def delete(self, conn_id):
         del self.upstreams[conn_id]
         del self.downstreams[conn_id]
         del self.last_of_seqs[conn_id]
         del self.handshake_queues[conn_id]
+        del self.ofp_buffs[conn_id]
         del self.ofp_connected[conn_id]
         del self.ofp_echo_ids[conn_id]
         del self.ofp_echo_times[conn_id]
         self.link_log.delete(id2str(conn_id))
+        self.flow_table_db.delete(conn_id)
 
 
 class Scl2Ctrl(object):
@@ -203,6 +210,7 @@ class Scl2Ctrl(object):
         '''
         clean up the closed tcp connection
         '''
+        self.logger.debug("scl2ctrl clean_connection: %s" % id2str(conn_id))
         if sock in self.outputs:
             self.outputs.remove(sock)
         if sock in self.inputs:
@@ -213,37 +221,42 @@ class Scl2Ctrl(object):
     def handle_of_msg(self, conn, data):
         '''
         parse of openflow messages
-        handshake
         put data into downstream
         '''
         offset = 0
         data_length = len(data)
-        self.logger.debug('data_length: %d' % data_length)
-        # parse multiple msgs in data
-        while data_length - offset >= 8:
-            ofp_type = ord(data[offset + 1])
+        tmp_buff = self.streams.ofp_buffs[conn.conn_id]
+        tmp_buff += data
+        buff_length = len(tmp_buff)
+        self.logger.debug(
+                'data_length: %d, buff_length: %d.' % (data_length, buff_length))
+        # parse multiple msgs in buff
+        while buff_length - offset >= 8:
+            ofp_type = ord(tmp_buff[offset + 1])
+
+            # ofp msg length checking
+            # assume that 2nd and 3rd bytes are for length
+            msg_length = ord(tmp_buff[offset + 2]) << 8 | ord(tmp_buff[offset + 3])
+            if buff_length - offset < msg_length:
+                break
 
             # ofp version checking
-            if ord(data[offset]) != of.OFP_VERSION:
+            if ord(tmp_buff[offset]) != of.OFP_VERSION:
                 if ofp_type == of.OFPT_HELLO:
                     self.logger.info(
                         'ofp ver err: the connection to controller is closed by scl_proxy, '
-                        'conn_id: %d', conn.conn_id)
+                        'conn_id: %d' % conn.conn_id)
                     self.clean_connection(conn.sock, conn.conn_id)
                 else:
                     self.logger.warn(
-                            'Bad OpenFlow version (0x%02x)' % ord(data[offset]))
-                    break
+                            'Bad OpenFlow version (0x%02x)' % ord(tmp_buff[offset]))
+                    offset = offset + msg_length
+                    continue
 
-            # ofp msg length checking
-            msg_length = ord(data[offset + 2]) << 8 | ord(data[offset + 3])
-            if msg_length is 0 or data_length - offset < msg_length:
-                self.logger.error('msg_length: %d, buffer error' % msg_length)
-                break
             self.logger.debug('ofp_type: %d, msg_length: %d' % (ofp_type, msg_length))
 
             # unpack msg according to ofp_type
-            new_offset, msg = unpackers[ofp_type](data, offset)
+            new_offset, msg = unpackers[ofp_type](tmp_buff, offset)
             assert new_offset - offset == msg_length
             offset = new_offset
 
@@ -254,6 +267,9 @@ class Scl2Ctrl(object):
             except Exception, e:
                 self.logger.error(
                         "Exception while handling OpenFlow %s msg, err: %s" % (ofp_type, e))
+
+        # save the uncomplete buffer
+        self.streams.ofp_buffs[conn.conn_id] = tmp_buff[offset:]
 
     def wait(self, selector):
         self.adjust_outputs()
@@ -297,7 +313,7 @@ class Scl2Ctrl(object):
                             'connection closed by controller, conn_id: %d' % conn.conn_id)
                         self.clean_connection(s, conn.conn_id)
                 except socket.error, e:
-                    logger.error('error in connection to controller: %s' % e)
+                    self.logger.error('error in connection to controller: %s' % e)
             # check timer, time up per second
             # send echo request to controller every second
             if self.timer.time_up:
@@ -365,6 +381,16 @@ class Scl2Scl(object):
                 '%s, %s, version: %d, state: %s' % (
                     switch, link, version, state))
 
+    def handle_flow_table_notify_msg(self, conn_id, seq, data):
+        if conn_id not in self.streams.upstreams:
+            self.logger.warn(
+                    'receive flow table msg from an unknown switch, '
+                    'the connection needs to be set up first')
+        else:
+            version, host1, host2, outport = scl.flow_entry_unpack(data)
+            self.streams.flow_table_db.sw_notify_update(
+                    conn_id, version, host1, host2, outport)
+
     def process_data(self, conn_id, type, seq, data):
         '''
         process data received from scl_agent
@@ -374,6 +400,8 @@ class Scl2Scl(object):
             self.handle_of_msg(conn_id, seq, data)
         elif type is scl.SCLT_LINK_NOTIFY:
             self.handle_link_notify_msg(conn_id, seq, data)
+        elif type is scl.SCLT_FLOW_TABLE_NOTIFY:
+            self.handle_flow_table_notify_msg(conn_id, seq, data)
 
     def wait(self, selector):
         if not self.streams.downstreams_empty():
@@ -400,10 +428,27 @@ class Scl2Scl(object):
                 self.process_data(conn_id, type, seq, data)
 
         # check timer
-        # (count + 1) % 3 per second
         # send link state request each three seconds
-        if self.timer.time_up and self.timer.count == 1:
-            # NOTE: switches upcall periodically
-            pass
-            #self.logger.debug('periodically broadcast link state rqst msg')
-            #self.udp_mcast.multicast(scl.addheader('', scl.SCLT_LINK_RQST), dst=True)
+        if self.timer.time_up and self.timer.link_state_rqst_count == 1:
+            ## switches upcall periodically
+            # pass
+            self.logger.debug('periodically broadcast link state rqst msg')
+            self.udp_mcast.multicast(scl.addheader('', scl.SCLT_LINK_RQST), dst=True)
+
+        # check timer
+        # send link state request each five seconds
+        if self.timer.time_up and self.timer.flow_table_rqst_count == 1:
+            ## switches upcall periodically
+            # pass
+            self.logger.debug('periodically broadcast flow table rqst msg')
+            self.udp_mcast.multicast(scl.addheader('', scl.SCLT_FLOW_TABLE_RQST), dst=True)
+        # check if flow tables between sw and ctrl are different
+        # if so, update ofp_flow_mod msgs
+        if self.timer.time_up and self.timer.flow_table_rqst_count == 3:
+            self.logger.debug('current flow tables status:\n %s' % (self.streams.flow_table_db.show()))
+            for conn_id, msgs in self.streams.flow_table_db.flow_tables_diff().iteritems():
+                if msgs:
+                    self.logger.debug('update flow_mod msg to ensure consistency: %d flow entries of %s' % (len(msgs), id2str(conn_id)))
+                for msg in msgs:
+                    self.streams.downstreams[conn_id].put(
+                        scl.addheader(msg.pack(), scl.SCLT_OF))
