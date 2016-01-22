@@ -21,6 +21,12 @@ WINDOW = 1 << 31
 # ovsdb unix path
 OVSDB = '/var/run/openvswitch/db.sock'
 
+# link bandwidth (Mbps)
+MAX_BANDWIDTH = 1
+
+# OFPST_VENDOR vendor ID, randomly select a number
+TE_VENDOR = 0xfffe
+
 # gossip protocol
 scl_gossip_mcast_grp = '224.1.1.2'
 scl_gossip_mcast_port = 6655

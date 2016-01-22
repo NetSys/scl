@@ -2,13 +2,19 @@ import json
 import networkx as nx
 from mininet.topo import Topo
 
+# defined in scl.conf.const
+MAX_BANDWIDTH = 1   # Mbps
+
 def topo2file(file_name, net, switches, hosts, ctrls):
     data = {}
     data['hosts'] = {}
     for host_name in hosts:
         host = net.getNodeByName(host_name)
         data['hosts'][host_name] = host.IP()
-    data['switches'] = switches
+    data['switches'] = {}
+    for sw_name in switches:
+        sw = net.getNodeByName(sw_name)
+        data['switches'][sw_name] = sw.IP()
     data['ctrls'] = [hosts[ctrl] for ctrl in ctrls]
     links = set()
     for sw_name in switches:
@@ -74,20 +80,20 @@ class FatTree(Topo):
         index = 0
         for aggr in self.aggr_list:
             for i in xrange(0, self.pod / 2):
-                self.addLink(aggr, self.core_list[index], )
+                self.addLink(aggr, self.core_list[index], bw=MAX_BANDWIDTH)
                 index = (index + 1) % self.core_num
 
         # aggregation <--> edge
         for i in xrange(0, self.aggr_num, self.pod / 2):
             for j in xrange(0, self.pod / 2):
                 for k in xrange(0, self.pod / 2):
-                    self.addLink(self.aggr_list[i + j], self.edge_list[i + k], )
+                    self.addLink(self.aggr_list[i + j], self.edge_list[i + k], bw=MAX_BANDWIDTH)
 
         # edge <--> host
         index = 0
         for edge in self.edge_list:
             for i in xrange(0, self.pod / 2):
-                self.addLink(edge, self.host_list[index], )
+                self.addLink(edge, self.host_list[index], bw=MAX_BANDWIDTH)
                 index = index + 1
 
     def create(self):

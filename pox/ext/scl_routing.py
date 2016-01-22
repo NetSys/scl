@@ -86,6 +86,9 @@ class scl_routing(object):
                     self.sw2link[sw2][sw1] = link_obj
                     self.intf2link[intf2] = link_obj
 
+    def graph_add_edge(self, sw1, sw2):
+        self.graph.add_edge(sw1, sw2, weight=1)
+
     def _handle_ConnectionUp(self, event):
         log.debug("Switch %s up.", dpid_to_str(event.dpid))
         sw_name = dpid2name(event.dpid)
@@ -112,7 +115,7 @@ class scl_routing(object):
                 link.state1 = of.OFPPS_LINK_DOWN
             else:
                 link.state2 = of.OFPPS_LINK_DOWN
-        self.update_flow_tables(self._calculate_route())
+        self.update_flow_tables(self._calculate_shortest_route())
 
     def _handle_PortStatus(self, event):
         assert event.modified is True
@@ -136,8 +139,8 @@ class scl_routing(object):
                 if link.state2 != of.OFPPS_LINK_DOWN:
                     # both ends of the link are up, update route
                     log.debug("both ends of the link are up, add edge %s %s" % (sw1, sw2))
-                    self.graph.add_edge(sw1, sw2)
-                    self.update_flow_tables(self._calculate_route())
+                    self.graph_add_edge(sw1, sw2)
+                    self.update_flow_tables(self._calculate_shortest_route())
                 else:
                     log.debug('one end of the link is up, wait for the other end')
                     return
@@ -146,8 +149,8 @@ class scl_routing(object):
                 if link.state1 != of.OFPPS_LINK_DOWN:
                     # both ends of the link are up, update route
                     log.debug("both ends of the link are up, add edge %s %s" % (sw1, sw2))
-                    self.graph.add_edge(sw1, sw2)
-                    self.update_flow_tables(self._calculate_route())
+                    self.graph_add_edge(sw1, sw2)
+                    self.update_flow_tables(self._calculate_shortest_route())
                 else:
                     log.debug('one end of the link is up, wait for the other end')
                     return
@@ -158,7 +161,7 @@ class scl_routing(object):
                     # an end of the link is down, update route
                     log.debug("one end of the link is down, remove edge %s %s" % (sw1, sw2))
                     self.graph.remove_edge(sw1, sw2)
-                    self.update_flow_tables(self._calculate_route())
+                    self.update_flow_tables(self._calculate_shortest_route())
                 else:
                     log.debug('both ends of the link are down')
                     return
@@ -168,13 +171,13 @@ class scl_routing(object):
                     # an end of the link is down, update route
                     log.debug("one end of the link is down, remove edge %s %s" % (sw1, sw2))
                     self.graph.remove_edge(sw1, sw2)
-                    self.update_flow_tables(self._calculate_route())
+                    self.update_flow_tables(self._calculate_shortest_route())
                 else:
                     log.debug('both ends of the link are down')
                     return
 
-    def _calculate_route(self):
-        log.debug("calculate routing...")
+    def _calculate_shortest_route(self):
+        log.debug("calculate shortest path routing...")
         log.debug("edges, num %d: %s", len(self.graph.edges()), json.dumps(self.graph.edges()))
         updates = {'modify': defaultdict(lambda: []), 'delete' : defaultdict(lambda: [])}
         current = 0
@@ -183,7 +186,7 @@ class scl_routing(object):
                 if host1 is host2:
                     continue
                 try:
-                    paths = list(nx.all_shortest_paths(self.graph, host1, host2))
+                    paths = list(nx.all_shortest_paths(self.graph, host1, host2, 'weight'))
                 except nx.exception.NetworkXNoPath:
                     continue
                 path = paths[current % len(paths)]
@@ -231,7 +234,8 @@ class scl_routing(object):
         msg.match.nw_dst = IPAddr(nw_dst)
         msg.priority = 50000    # hard code
         msg.actions.append(of.ofp_action_output(port = outport))
-        self.sw2conn[sw_name].send(msg.pack())
+        if sw_name in self.sw2conn:
+            self.sw2conn[sw_name].send(msg.pack())
 
     def update_flow_tables(self, updates):
         if not updates['modify'] and not updates['delete']:

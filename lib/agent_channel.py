@@ -1,5 +1,6 @@
 import Queue
 import socket
+import time
 from conf.const import RECV_BUF_SIZE
 from socket_utils import *
 from ovsdb_utils import OvsdbConn
@@ -49,7 +50,7 @@ def handle_FEATURES_REPLY(scl2sw, msg):
         scl2sw.logger.info('port_status: %s %d' % (port.name, port.state))
         link_msg = scl2sw.streams.link_events.update(
                 port.name, port.port_no, port.state)
-        scl2sw.streams.upstream.put(scl.addheader(link_msg, scl.SCLT_LINK_NOTIFY))
+        scl2sw.streams.upstream_enqueue(scl.scl_pack(link_msg, scl.SCLT_LINK_NOTIFY))
 
     set_config = of.ofp_set_config()
     barrier = of.ofp_barrier_request()
@@ -68,10 +69,10 @@ def handle_PORT_STATUS(scl2sw, msg):
         scl2sw.logger.info('port_status: %s %d' % (msg.desc.name, msg.desc.state))
         link_msg = scl2sw.streams.link_events.update(
                 msg.desc.name, msg.desc.port_no, msg.desc.state)
-        scl2sw.streams.upstream.put(scl.addheader(link_msg, scl.SCLT_LINK_NOTIFY))
+        scl2sw.streams.upstream_enqueue(scl.scl_pack(link_msg, scl.SCLT_LINK_NOTIFY))
 
 def handle_PACKET_IN(scl2sw, msg):
-    scl2sw.streams.upstream.put(scl.addheader(msg.pack(), scl.SCLT_OF))
+    scl2sw.streams.upstream_enqueue(scl.scl_pack(msg.pack(), scl.SCLT_OF))
 
 def handle_ERROR_MSG(scl2sw, msg):
     scl2sw.logger.info('ofp_error: %s' % msg.show())
@@ -94,6 +95,36 @@ def handle_BARRIER(scl2sw, msg):
         scl2sw.logger.info('connection handshake successes')
         scl2sw.streams.sw_connected = True
 
+def handle_STATS_REPLY(scl2sw, msg):
+    # send flow stats reply back to scl proxies
+    scl2sw.logger.debug('handle_STATS_REPLY')
+    scl2sw.logger.debug('stats reply packet,  %s' % msg.show())
+    if msg.type != of.OFPST_FLOW:
+        return
+
+    if len(scl2sw.streams.flow_stats_buff) != 0:
+        if msg.xid == scl2sw.streams.flow_stats_buff[0].xid:
+            scl2sw.streams.flow_stats_buff.append(msg)
+        else:
+            scl2sw.logger.error(
+                    'continuous stats failed new xid %d, excepted xid %d' % (
+                        msg.xid, scl2sw.streams.flow_stats_buff[0].xid))
+    else:
+        scl2sw.streams.flow_stats_buff = [msg]
+
+    if msg.is_last_reply:
+        t = time.time()
+        sec = int(t)
+        nsec = int((t - sec) * 1000000000)
+        (addr, seq) = scl2sw.streams.flow_stats_seq_q.get()
+        assert seq == scl2sw.streams.flow_stats_buff[0].xid
+        for msg in scl2sw.streams.flow_stats_buff:
+            ofp_flow_stats_rply_msg = scl.flow_stats_rply_pack(
+                    addr, seq, sec, nsec, msg.pack())
+            scl2sw.streams.upstream_enqueue(
+                    scl.scl_pack(ofp_flow_stats_rply_msg, scl.SCLT_FLOW_STATS_REPLY))
+        scl2sw.streams.flow_stats_buff = []
+
 # A list, where the index is an OFPT, and the value is a function to
 # call for that type
 # This is generated automatically based on handlerMap
@@ -109,6 +140,7 @@ handlerMap = {
     of.OFPT_PORT_STATUS : handle_PORT_STATUS,
     of.OFPT_ERROR : handle_ERROR_MSG,
     of.OFPT_BARRIER_REPLY : handle_BARRIER,
+    of.OFPT_STATS_REPLY : handle_STATS_REPLY,
 }
 
 def _set_handlers ():
@@ -126,11 +158,27 @@ class Streams(object):
         self.flow_table = scl.FlowTable(logger)
         self.scl2scl_buff = ''
         self.sw_ofp_buff = ''
+        self.flow_stats_seq_q = Queue.Queue()
+        self.flow_stats_buff = []
         self.sw_connected = False
-        self.last_of_seq = -1
         self.sw_features = None
         self.datapath_id = None
         self.barrier_xid = 0
+
+    def reset(self):
+        self.downstream.queue.clear()
+        self.flow_table.reset()
+        self.flow_stats_seq_q.queue.clear()
+        self.flow_stats_buff = []
+        self.sw_ofp_buff = ''
+        self.sw_connected = False
+        self.sw_features = None
+        self.datapath_id = None
+        self.barrier_xid = 0
+
+    def upstream_enqueue(self, msgs):
+        for msg in msgs:
+            self.upstream.put(msg)
 
 
 class Scl2Sw(object):
@@ -151,7 +199,7 @@ class Scl2Sw(object):
         data_length = len(data)
         tmp_buff = self.streams.sw_ofp_buff
         tmp_buff += data
-        buff_length = len(data)
+        buff_length = len(tmp_buff)
         self.logger.debug(
                 'data_length: %d, buff_length: %d.' % (data_length, buff_length))
         # parse multiple msgs in buff
@@ -182,26 +230,19 @@ class Scl2Sw(object):
             offset = new_offset
 
             # handle ofp msg
-            #try:
-            h = handlers[ofp_type]
-            h(self, msg)
-            #except Exception, e:
-            #    self.logger.error(
-            #            "Exception while handling OpenFlow %s msg, err: %s" % (ofp_type, e))
+            try:
+                h = handlers[ofp_type]
+                h(self, msg)
+            except Exception, e:
+                self.logger.error(
+                        "Exception while handling OpenFlow %s msg, err: %s" % (ofp_type, e))
 
         # save the uncomplete buffer
         self.streams.sw_ofp_buff = tmp_buff[offset:]
 
     def client_close(self):
         self.tcp_client = None
-        self.streams.downstream.queue.clear()
-        self.streams.last_of_seq = -1
-        self.streams.sw_ofp_buff = ''
-        self.streams.sw_connected = False
-        self.streams.sw_features = None
-        self.streams.barrier_xid = 0
-        self.streams.datapath_id = None
-        self.streams.flow_table.reset()
+        self.streams.reset()
 
     def wait(self, selector):
         if not self.tcp_client:
@@ -257,11 +298,16 @@ class Scl2Scl(object):
 
     def handle_flow_table_request(self):
         for msg in self.streams.flow_table.current_flow_entries():
-            self.streams.upstream.put(scl.addheader(msg, scl.SCLT_FLOW_TABLE_NOTIFY))
+            self.streams.upstream_enqueue(scl.scl_pack(msg, scl.SCLT_FLOW_TABLE_NOTIFY))
 
     def handle_link_request(self):
         for msg in self.streams.link_events.current_events():
-            self.streams.upstream.put(scl.addheader(msg, scl.SCLT_LINK_NOTIFY))
+            self.streams.upstream_enqueue(scl.scl_pack(msg, scl.SCLT_LINK_NOTIFY))
+
+    def handle_flow_stats_request(self, data):
+        addr, seq, ofp_stats_rqst_msg = scl.flow_stats_rqst_unpack(data)
+        self.streams.flow_stats_seq_q.put((addr, seq))
+        self.streams.downstream.put(ofp_stats_rqst_msg)
 
     def handle_of_msg(self, data):
         '''
@@ -272,7 +318,7 @@ class Scl2Scl(object):
         data_length = len(data)
         tmp_buff = self.streams.scl2scl_buff
         tmp_buff += data
-        buff_length = len(data)
+        buff_length = len(tmp_buff)
         self.logger.debug(
                 'data_length: %d, buff_length: %d.' % (data_length, buff_length))
         # parse multiple msgs in buff
@@ -322,19 +368,23 @@ class Scl2Scl(object):
             if data:
                 self.logger.debug('udp_mcast listener received msg')
                 # deal with commands from scl proxies
-                scl_type, seq, data = scl.parseheader(data)
-                if scl_type is scl.SCLT_OF and not self.streams.sw_connected:
-                    self.logger.error('receive ofp_msg from scl_proxy ',
-                            addr[0], 'while connection to switch closed')
-                elif scl_type is scl.SCLT_OF and self.streams.sw_connected:
-                    self.logger.debug('receive ofp_msg from scl_proxy %s' % addr[0])
-                    self.handle_of_msg(data)
-                elif scl_type is scl.SCLT_LINK_RQST:
-                    self.logger.debug('receive sclt_link_rqst msg from scl_proxy %s' % addr[0])
-                    self.handle_link_request()
-                elif scl_type is scl.SCLT_FLOW_TABLE_RQST:
-                    self.logger.debug('receive sclt_flow_table_rqst msg from scl_proxy %s' % addr[0])
-                    self.handle_flow_table_request()
+                scl_type, data = scl.scl_unpack(data)
+                if data is not None:
+                    if scl_type is scl.SCLT_OF and not self.streams.sw_connected:
+                        self.logger.error('receive ofp_msg from scl_proxy ',
+                                addr[0], 'while connection to switch closed')
+                    elif scl_type is scl.SCLT_OF and self.streams.sw_connected:
+                        self.logger.debug('receive ofp_msg from scl_proxy %s' % addr[0])
+                        self.handle_of_msg(data)
+                    elif scl_type is scl.SCLT_LINK_RQST:
+                        self.logger.debug('receive sclt_link_rqst msg from scl_proxy %s' % addr[0])
+                        self.handle_link_request()
+                    elif scl_type is scl.SCLT_FLOW_TABLE_RQST:
+                        self.logger.debug('receive sclt_flow_table_rqst msg from scl_proxy %s' % addr[0])
+                        self.handle_flow_table_request()
+                    elif scl_type is scl.SCLT_FLOW_STATS_RQST:
+                        self.logger.debug('receive sclt_flow_stats_rqst msg from scl_proxy %s' % addr[0])
+                        self.handle_flow_stats_request(data)
 
         # socket is writeable
         if self.udp_mcast.sock in lists[1]:

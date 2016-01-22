@@ -16,6 +16,12 @@ def str2id(switch):
     ip, port = switch.split(':')
     return (ip2int(ip) << 16) + int(port)
 
+def id2name(conn_id):
+    name = int2ip(conn_id >> 16).split('.')[2]
+    for i in range(0, 3 - len(name)):
+        name = '0' + name
+    return 's' + name
+
 class UdpConn(object):
     '''
     For scl on the switch side, connect to scl on the controller side
@@ -71,22 +77,34 @@ class UdpMcastListener(object):
         self.dst_addr[addr_id] = addr
         return data, addr_id
 
-    def send_to_id(self, msg, addr_id):
+    def send_to_id(self, msgs, addr_id):
         if not self.dst_addr[addr_id]:
             ip, port = id2str(addr_id).split(':')
             addr = (ip, int(port))
             self.dst_addr[addr_id] = addr
-        self.sock.sendto(msg, self.dst_addr[addr_id])
+        if isinstance(msgs, list):
+            for msg in msgs:
+                self.sock.sendto(msg, self.dst_addr[addr_id])
+        else:
+            self.sock.sendto(msgs, self.dst_addr[addr_id])
 
     def send_to_addr(self, msg, addr, port):
         self.sock.sendto(msg, (addr, port))
 
-    def multicast(self, msg, dst=False):
+    def multicast(self, msgs, dst=False):
         # route add -host self.src_grp dev self.intf
         if not dst:
-            self.sock.sendto(msg, (self.src_grp, self.src_port))
+            if isinstance(msgs, list):
+                for msg in msgs:
+                    self.sock.sendto(msg, (self.src_grp, self.src_port))
+            else:
+                self.sock.sendto(msgs, (self.src_grp, self.src_port))
         else:
-            self.sock.sendto(msg, (self.dst_grp, self.dst_port))
+            if isinstance(msgs, list):
+                for msg in msgs:
+                    self.sock.sendto(msg, (self.dst_grp, self.dst_port))
+            else:
+                self.sock.sendto(msgs, (self.dst_grp, self.dst_port))
 
 class TcpConn(object):
     '''

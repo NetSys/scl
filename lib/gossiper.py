@@ -208,7 +208,7 @@ class Gossiper(object):
                         self.logger.info(
                                 'receive link msg of a new switch by gossiper, '
                                 'set up a new connection from proxy to controller')
-                        self.scl2ctrl.open(str2id(switch), 0)
+                        self.scl2ctrl.open(str2id(switch))
                     ret = self.link_log.update(switch, link, event, items['state'], addr)
                     if ret:
                         self.streams.upcall_link_status(ret[0], ret[1], ret[2])
@@ -219,20 +219,6 @@ class Gossiper(object):
         data = struct.pack('!I', ver) + struct.pack('!B', idx) +\
                struct.pack('!B', num) + data
         return data
-
-    def _parse_data(self, data, addr_id):
-        offset = 0
-        data_length = len(data)
-        self.buff += data
-        buff_length = len(self.buff)
-        while buff_length - offset >= 2:
-            msg_length = ord(self.buff[offset]) << 8 | ord(self.buff[offset + 1])
-            if buff_length - offset < msg_length:
-                break
-            msg = self.buff[offset + 2: offset + msg_length]
-            self._handle_msg(byteify(json.loads(msg)), addr_id)
-            offset = offset + msg_length
-        self.buff = self.buff[offset:]
 
     def _parse_data(self, data):
         ver = ord(data[0]) << 24 + ord(data[1]) << 16 + ord(data[2]) << 8 + ord(data[3])

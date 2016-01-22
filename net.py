@@ -1,6 +1,7 @@
 import os
 from net_utils.topo import topo2file, FatTree, FatTreeOutBand
 from mininet.net import Mininet
+from mininet.link import TCLink
 from mininet.cli import CLI
 from mininet.node import Controller, RemoteController
 from mininet.log import setLogLevel
@@ -10,7 +11,7 @@ DIR = 'bash net_utils'
 LOG_LEVEL = 'debug'
 
 class SclNet(object):
-    def __init__(self, topo='fattree'):
+    def __init__(self, topo='fattree', app='shortest'):
         self.switches = []
         self.hosts = []
         self.topo = topo
@@ -24,7 +25,7 @@ class SclNet(object):
             self.skeleton = FatTreeOutBand(4, self.switches, self.hosts, self.ctrls)
         # autoStaticArp doesnt works well, because we will move the IP in
         # the host interface to the internal port of the switch
-        self.net = Mininet(topo=self.skeleton, controller=None)
+        self.net = Mininet(topo=self.skeleton, controller=None, link=TCLink)
         # write topology to file
         self.file_name = os.path.abspath('./conf') + '/' + topo + '.json'
         topo2file(self.file_name, self.net, self.switches, self.hosts, self.ctrls)
@@ -35,7 +36,7 @@ class SclNet(object):
             self.start_scl_agent()
             self.start_scl_proxy()
             # FIXME: now, to start pox, download pox and mv it in this directory
-            self.start_controller()
+            self.start_controller(app)
             self.start_inband_connection()
             # flow entries added before set-controller would be flushed
             self.config_ctrl_vlan()
@@ -47,7 +48,7 @@ class SclNet(object):
             self.start_scl_agent()
             self.start_scl_proxy(add_route=False)
             # FIXME: now, to start pox, download pox and mv it in this directory
-            self.start_controller()
+            self.start_controller(app)
             self.start_outband_connection()
 
     def set_static_arps(self):
@@ -82,7 +83,7 @@ class SclNet(object):
             host.cmdPrint('python scl_proxy.py %d %d %s > log/scl_proxy_%d.log 2>&1 &' % (ctrl_id, ctrls_num, host.IP(), ctrl_id))
             ctrl_id = ctrl_id + 1
 
-    def start_controller(self):
+    def start_controller(self, app):
         ctrl_id = 0
         pox_format='"%(asctime)s - %(name)s - %(levelname)s - %(message)s"'
         pox_datefmt='"%Y%m%d %H:%M:%S"'
@@ -90,7 +91,10 @@ class SclNet(object):
             host = self.net.getNodeByName(self.hosts[ctrl])
             # NOTE: hard code
             #host.cmd('python pox/pox.py log.level --DEBUG log --file=log/ctrl_%d.log,w --format=%s --datefmt=%s scl_routing --name=%s &' % (ctrl_id, pox_format, pox_datefmt, self.file_name))
-            host.cmd('python pox/pox.py log.level --DEBUG log --format=%s --datefmt=%s scl_routing --name=%s > log/ctrl_%d.log 2>&1 &' % (pox_format, pox_datefmt, self.file_name, ctrl_id))
+            if app == 'shortest':
+                host.cmd('python pox/pox.py log.level --DEBUG log --format=%s --datefmt=%s scl_routing --name=%s > log/ctrl_%d.log 2>&1 &' % (pox_format, pox_datefmt, self.file_name, ctrl_id))
+            elif app == 'te':
+                host.cmd('python pox/pox.py log.level --DEBUG log --format=%s --datefmt=%s scl_te --name=%s > log/ctrl_%d.log 2>&1 &' % (pox_format, pox_datefmt, self.file_name, ctrl_id))
             ctrl_id = ctrl_id + 1
 
     def start_switch(self):
