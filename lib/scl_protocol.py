@@ -2,100 +2,220 @@ import struct
 import socket
 import libopenflow_01 as of
 from collections import defaultdict
-from socket_utils import id2str
+from socket_utils import id2str, ip2int
 from pox.packet.addresses import IPAddr
 from conf.const import RECV_BUF_SIZE, WINDOW, MAX_BANDWIDTH
 
 
-generate_of_seq = of.xid_generator()
+generate_scl_seq = of.xid_generator()
 flow_table_status = of.xid_generator()
 flow_stats_rqst_seq = of.xid_generator()
 
+SCL_PROXY = 0
+SCL_AGENT = 1
+my_type = None
+my_addr = ''                    # intf ip of local node, set by Scl2Scl
+ALL_CTRL_ADDR = '0.0.0.0'       # intf ip for all controllers
+ALL_SW_ADDR = '0.0.0.1'         # intf ip for all switches
+received_pkts = set()
 
-SCLT_HELLO              = 0 # set up connection
-SCLT_CLOSE              = 1 # close connection
-SCLT_OF                 = 2 # normal of message
-SCLT_LINK_RQST          = 3 # preriodic link request
-SCLT_LINK_NOTIFY        = 4 # preriodic link reply
-SCLT_FLOW_TABLE_RQST    = 5 # preriodic flow table request
-SCLT_FLOW_TABLE_NOTIFY  = 6 # preriodic flow table reply
-SCLT_FLOW_STATS_RQST    = 7 # preriodic flow stats request
-SCLT_FLOW_STATS_REPLY   = 8 # preriodic flow stats reply
+SCLT_HELLO              = 1     # set up connection
+SCLT_CLOSE              = 2     # close connection
+SCLT_OF_PROXY           = 3     # normal of message
+SCLT_OF_AGENT           = 4     # normal of message
+SCLT_LINK_RQST          = 5     # periodic link request
+SCLT_LINK_NOTIFY        = 6     # periodic link reply
+SCLT_FLOW_TABLE_RQST    = 7     # periodic flow table request
+SCLT_FLOW_TABLE_NOTIFY  = 8     # periodic flow table reply
+SCLT_FLOW_STATS_RQST    = 9     # periodic flow stats request
+SCLT_FLOW_STATS_REPLY   = 10    # periodic flow stats reply
+SCLT_GOSSIP_SYN         = 11    # periodic log digest broadcast
+SCLT_GOSSIP_ACK         = 12    # missing log response if existing
 
 OFP_MAX_PORT_NAME_LEN = 16
 
-SCL_HEADER_SIZE = 7
-max_scl_data_length = RECV_BUF_SIZE - SCL_HEADER_SIZE
-buffs = defaultdict(lambda: defaultdict(lambda: None)) # [con][idx] --> data
+
+def flood_and_process_check(src_addr, dst_addr, ver):
+    # returned variables: flood, process
+    if my_type == SCL_AGENT:
+        packet_id = src_addr + dst_addr + str(ver)
+        if packet_id in received_pkts:
+            return False, False
+        else:
+            received_pkts.add(packet_id)
+        if dst_addr == my_addr:
+            return False, True
+        elif dst_addr == ALL_SW_ADDR:
+            return True, True
+        else:
+            return True, False
+    elif my_type == SCL_PROXY:
+        if dst_addr != my_addr and dst_addr != ALL_CTRL_ADDR:
+            return False, False
+        else:
+            return False, True
+
+
+#---------------------------packet level communication-------------------------#
+
+SCL_UDP_HEADER_SIZE = 7
+max_scl_data_length = RECV_BUF_SIZE - SCL_UDP_HEADER_SIZE
+
+# maintain states of multiple connections
+# scl udp header format (size: byte)
+#   SCLT(1) SRC_ADDR(4) DST_ADDR(4) VERSION(4) FRAGMENT_ID(1) FRAGMENT_NUM(1)
+udp_buffs = defaultdict(lambda: defaultdict(lambda: None)) # [con][idx] --> data
 version = defaultdict(lambda: None)     # [con] --> ver
-msgs_num = defaultdict(lambda: None)    # [con] --> num of msg fragment
+frag_num = defaultdict(lambda: None)    # [con] --> num of msg fragments
 
 
-def scl_pack(data, sclt):
-    # the returned msgs is a list
-    msgs = []
+def scl_udp_pack(data, sclt, src_addr, dst_addr):
+    # the returned value is a list
+    frags = []
     while len(data) > max_scl_data_length:
-        msgs.append(data[0: max_scl_data_length])
+        frags.append(data[0: max_scl_data_length])
         data = data[max_scl_data_length:]
-    msgs.append(data)
-    msgs_num = len(msgs)
-    version = generate_of_seq()
-    for i in xrange(0, msgs_num):
+    frags.append(data)
+    frag_num = len(frags)
+    current_ver = generate_scl_seq()
+    for i in xrange(0, frag_num):
         # addheader
-        msgs[i] = struct.pack('!BIBB', sclt, version, i, msgs_num) + msgs[i]
-    return msgs
+        frags[i] = struct.pack('!B', sclt) + \
+                socket.inet_aton(src_addr) + \
+                socket.inet_aton(dst_addr) + \
+                struct.pack('!IBB', current_ver, i, frag_num) + frags[i]
+    return frags
 
-def scl_parse_msg(msg):
+def scl_udp_header_parse(msg):
     offset = 0
     sclt = ord(msg[offset])
-    ver = ord(msg[offset+1]) << 24 | ord(msg[offset+2]) << 16 |\
-          ord(msg[offset+3]) << 8 | ord(msg[offset+4])
-    idx = ord(msg[offset+5])
-    num = ord(msg[offset+6])
-    return sclt, ver, idx, num, msg[offset+7:]
+    offset += 1
+    src_addr = socket.inet_ntoa(msg[offset: offset+4])
+    offset += 4
+    dst_addr = socket.inet_ntoa(msg[offset: offset+4])
+    offset += 4
+    ver = ord(msg[offset]) << 24 | ord(msg[offset+1]) << 16 |\
+          ord(msg[offset+2]) << 8 | ord(msg[offset+3])
+    offset += 4
+    idx = ord(msg[offset])
+    offset += 1
+    num = ord(msg[offset])
+    offset += 1
+    return sclt, src_addr, dst_addr, ver, idx, num, msg[offset:]
 
 def check_completeness(con):
-    if len(buffs[con]) == msgs_num[con]:
+    if len(udp_buffs[con]) == frag_num[con]:
         complete_msg = ''
-        for i in xrange(0, msgs_num[con]):
-            complete_msg += buffs[con][i]
+        for i in xrange(0, frag_num[con]):
+            complete_msg += udp_buffs[con][i]
         del version[con]
-        del msgs_num[con]
-        del buffs[con]
+        del frag_num[con]
+        del udp_buffs[con]
         return complete_msg
     else:
         return None
 
-def scl_unpack(msg, con=0):
-    sclt, ver, idx, num, data = scl_parse_msg(msg)
+def scl_udp_unpack(msg):
+    # returned variables: flood, sclt, conn_id, msg
+    #                (proxy will ignore the flood variable)
+    # calling functions decide if to continue to process
+    # according to msg variable, None means passed
+    sclt, src_addr, dst_addr, ver, idx, num, data = scl_udp_header_parse(msg)
+    flood, process = flood_and_process_check(src_addr, dst_addr, ver)
+    if not process:
+        return flood, None, None, None
+    con = ip2int(src_addr)
     if not version[con]:
         # new version, last msg has been processed
         version[con] = ver
-        msgs_num[con] = num
-        buffs[con][idx] = data
-        return sclt, check_completeness(con)
+        frag_num[con] = num
+        udp_buffs[con][idx] = data
+        return flood, sclt, con, check_completeness(con)
     else:
         if ver == version[con]:
             # the same version, last msg to be processed
-            if msgs_num[con] != num:
-                # msgs in the sameme version have different fragment num
+            if frag_num[con] != num:
+                # ! fragments in the sameme version have different fragment num
                 del version[con]
-                del msgs_num[con]
-                del buffs[con]
-                return sclt, None
+                del frag_num[con]
+                del udp_buffs[con]
+                return flood, sclt, con, None
             else:
-                buffs[con][idx] = data
-                return sclt, check_completeness(con)
+                udp_buffs[con][idx] = data
+                return flood, sclt, con, check_completeness(con)
         elif (ver > version[con] and ver - version[con] < WINDOW) or \
              (ver < version[con] and version[con] - ver > WINDOW):
             # new version, discard current states, update ver and data
             version[con] = ver
-            msgs_num[con] = num
-            del buffs[con]
-            buffs[con][idx] = data
-            return sclt, check_completeness(con)
+            frag_num[con] = num
+            del udp_buffs[con]
+            udp_buffs[con][idx] = data
+            return flood, sclt, con, check_completeness(con)
         else:
-            return sclt, None
+            return flood, sclt, con, None
+
+
+#----------------------------flow level communication--------------------------#
+
+SCL_TCP_HEADER_SIZE = 15
+
+# maintain states of multiple connections
+# scl tcp header format (size: byte)
+#   SCLT(1) LENGTH(2) SRC_ADDR(4) DST_ADDR(4) VERSION(4)
+tcp_buffs = defaultdict(lambda: None)       # [con] --> data
+
+
+def scl_tcp_close(conn_id):
+    # clean the bufffer if it exists
+    if conn_id in tcp_buffs:
+        del tcp_buffs[conn_id]
+
+def scl_tcp_pack(data, sclt, src_addr, dst_addr):
+    length = len(data) + SCL_TCP_HEADER_SIZE
+    current_ver = generate_scl_seq()
+    msg = struct.pack('!BH', sclt, length)
+    msg += socket.inet_aton(src_addr)
+    msg += socket.inet_aton(dst_addr)
+    msg += struct.pack('!I', current_ver)
+    msg += data
+    return msg
+
+def scl_tcp_header_parse(msg):
+    offset = 0
+    sclt = ord(msg[offset])
+    offset += 1
+    length = ord(msg[offset]) << 8 | ord(msg[offset+1])
+    offset += 2
+    src_addr = socket.inet_ntoa(msg[offset: offset+4])
+    offset += 4
+    dst_addr = socket.inet_ntoa(msg[offset: offset+4])
+    offset += 4
+    ver = ord(msg[offset]) << 24 | ord(msg[offset+1]) << 16 |\
+          ord(msg[offset+2]) << 8 | ord(msg[offset+3])
+    offset += 4
+    return sclt, length, src_addr, dst_addr, ver, msg[offset:]
+
+def scl_tcp_unpack(data, conn_id):
+    msgs = []
+    tmp_buff = tcp_buffs[conn_id] if tcp_buffs[conn_id] else ''
+    tmp_buff += data
+    buff_length = len(tmp_buff)
+    # parse multiple msgs in buff
+    offset = 0
+    while buff_length - offset >= SCL_TCP_HEADER_SIZE:
+        msg_length = ord(tmp_buff[offset + 1]) << 8 | ord(tmp_buff[offset + 2])
+        if buff_length - offset < msg_length:
+            break
+        sclt, length, src_addr, dst_addr, ver, msg = scl_tcp_header_parse(
+                tmp_buff[offset: offset + msg_length])
+        flood, process = flood_and_process_check(src_addr, dst_addr, ver)
+        if not process:
+            msgs.append([flood, None, None])
+        else:
+            msgs.append([flood, sclt, msg])
+        offset = offset + msg_length
+    tcp_buffs[conn_id] = tmp_buff[offset:]
+    return msgs
 
 def link_state_pack(intf, port_no, state, version):
     msg = ''

@@ -31,10 +31,12 @@ def topo2file(file_name, net, switches, hosts, ctrls):
                 another_port = another_sw.ports[another_intf] + 1
                 if intf is intf.link.intf1:
                     port1, port2 = port, another_port
+                    sw1, sw2 = sw_name, another_sw_name
                 else:
                     port2, port1 = port, another_port
+                    sw2, sw1 = sw_name, another_sw_name
                 links.add((
-                    intf.link.intf1.name, port1, intf.link.intf2.name, port2))
+                    sw1, intf.link.intf1.name, port1, sw2, intf.link.intf2.name, port2))
     data['links'] = list(links)
     with open(file_name, 'w') as out_file:
         json.dump(data, out_file)

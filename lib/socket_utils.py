@@ -1,6 +1,7 @@
 import socket
 import struct
 from collections import defaultdict
+from conf.const import MAX_TCP_CONNS, UDP_BROADCAST_ADDR
 
 
 def ip2int(addr):
@@ -10,17 +11,33 @@ def int2ip(addr):
     return socket.inet_ntoa(struct.pack("!I", addr))
 
 def id2str(conn_id):
-    return int2ip(conn_id >> 16) + ':' + str(conn_id % (1 << 16))
+    #return int2ip(conn_id >> 16) + ':' + str(conn_id % (1 << 16))
+    return int2ip(conn_id)
 
 def str2id(switch):
-    ip, port = switch.split(':')
-    return (ip2int(ip) << 16) + int(port)
+    #ip, port = switch.split(':')
+    #return (ip2int(ip) << 16) + int(port)
+    return ip2int(switch)
 
 def id2name(conn_id):
-    name = int2ip(conn_id >> 16).split('.')[2]
+    name = int2ip(conn_id).split('.')[2]
     for i in range(0, 3 - len(name)):
         name = '0' + name
     return 's' + name
+
+def byteify(input):
+    '''
+    convert unicode from json.loads to utf-8
+    '''
+    if isinstance(input, dict):
+        return {byteify(key): byteify(value) for key, value in input.iteritems()}
+    elif isinstance(input, list):
+        return [byteify(element) for element in input]
+    elif isinstance(input, unicode):
+        return input.encode('utf-8')
+    else:
+        return input
+
 
 class UdpConn(object):
     '''
@@ -40,6 +57,35 @@ class UdpConn(object):
 
     def send(self, msg):
         self.sock.send(msg, self.dst_addr)
+
+
+class UdpFloodListener(object):
+    def __init__(self, src_intf, src_port, dst_port):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self.sock.setblocking(0)            # non-blocking
+        if not src_intf:
+            self.sock.bind(('', src_port))
+        else:
+            self.sock.bind((src_intf, src_port))
+        self.dst_addr = (UDP_BROADCAST_ADDR, dst_port)
+
+    def recvfrom(self, buf_size):
+        data, addr = self.sock.recvfrom(buf_size)
+        return data, addr
+
+    def recv(self, buf_size):
+        data = self.sock.recv(buf_size)
+        return data
+
+    def send(self, msgs):
+        if isinstance(msgs, list):
+            for msg in msgs:
+                self.sock.sendto(msg, self.dst_addr)
+        else:
+            self.sock.sendto(msgs, self.dst_addr)
+
 
 class UdpMcastListener(object):
     '''
@@ -73,7 +119,7 @@ class UdpMcastListener(object):
 
     def recvfrom(self, buf_size):
         data, addr = self.sock.recvfrom(buf_size) # addr = ('ip', port)
-        addr_id = (ip2int(addr[0]) << 16) + addr[1]
+        addr_id = ip2int(addr[0])
         self.dst_addr[addr_id] = addr
         return data, addr_id
 
@@ -105,6 +151,7 @@ class UdpMcastListener(object):
                     self.sock.sendto(msg, (self.dst_grp, self.dst_port))
             else:
                 self.sock.sendto(msgs, (self.dst_grp, self.dst_port))
+
 
 class TcpConn(object):
     '''
@@ -155,13 +202,15 @@ class TcpConn(object):
             self.sock.close()
             self.connectted = False
 
-class TcpConns(object):
+
+class TcpConnsMulti2One(object):
     '''
     For scl on the controller side, connect to controller
+    multiple sources to one destination
     '''
     def __init__(self, dst_host, dst_port):
-        self.sock2conn = {}                     # k: v is sock: conns
-        self.id2conn = {}                       # k: v is addr_id: conns
+        self.sock2conn = {}                     # k: v is sock: conn
+        self.id2conn = {}                       # k: v is conn_id: conn
         self.dst_host = dst_host
         self.dst_port = dst_port
 
@@ -174,7 +223,6 @@ class TcpConns(object):
 
     def close(self, conn_id):
         self.id2conn[conn_id].close()
-        # TODO: del conn object
         del self.sock2conn[self.id2conn[conn_id].sock]
         del self.id2conn[conn_id]
 
@@ -185,23 +233,56 @@ class TcpConns(object):
     def send(self, msg):
         self.sock.send(msg)
 
-class TcpListen(object):
+
+class TcpConnsOne2Multi(object):
+    def __init__(self, dst_intfs, dst_port):
+        self.intf2conn = defaultdict(lambda: None)  # k: v is intf: conn
+        self.sock2conn = {}                         # k: v is sock: conn
+        self.dst_intfs = dst_intfs
+        self.dst_port = dst_port
+
+    def open(self, intf):
+        conn = TcpConn(intf, self.dst_port, None, intf)
+        ret, err = conn.connect()
+        self.intf2conn[intf] = conn
+        self.sock2conn[conn.sock] = conn
+        return ret, err
+
+    def close(self, intf):
+        self.intf2conn[intf].close()
+        del self.sock2conn[self.intf2conn[intf].sock]
+        del self.intf2conn[intf]
+
+
+class TcpListener(object):
     '''
     For scl on the switch side, listen connections from switch
     '''
     def __init__(self, src_host, src_port):
+        self.sock2conn = {}                     # k: v is sock: conn
+        self.id2conn = {}                       # k: v is conn_id: conn
         self.sock = None
         self.host = src_host
         self.port = src_port
+        self.open()
 
     def open(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.setblocking(0)            # non-blocking
         self.sock.bind((self.host, self.port))
-        self.sock.listen(20)                # max listening connections
+        self.sock.listen(MAX_TCP_CONNS)     # max open connections
 
     def accept(self):
         sock, addr = self.sock.accept()
         sock.setblocking(0)
-        return TcpConn(addr[0], addr[1], sock)
+        conn_id = ip2int(addr[0])
+        conn = TcpConn(addr[0], addr[1], sock, conn_id)
+        self.sock2conn[sock] = conn
+        self.id2conn[conn_id] = conn
+        return sock, conn_id
+
+    def close(self, conn_id):
+        self.id2conn[conn_id].close()
+        del self.sock2conn[self.id2conn[conn_id].sock]
+        del self.id2conn[conn_id]

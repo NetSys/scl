@@ -4,9 +4,11 @@ SW="$1"
 INTFS=(`ifconfig | awk '/HWaddr/{print $1}'`)
 
 ovs-vsctl --db=unix:/tmp/mininet-$SW/db.sock add-br $SW
-# enable stp, disable default in-band hidden flows
+# disable stp, disable default in-band hidden flows
 ovs-vsctl --db=unix:/tmp/mininet-$SW/db.sock set Bridge $SW other-config:disable-in-band=true
 ovs-vsctl --db=unix:/tmp/mininet-$SW/db.sock set-fail-mode $SW secure
+# tag 100 for control plane
+# ovs-vsctl --db=unix:/tmp/mininet-$SW/db.sock set port $SW tag=100
 
 for IF in ${INTFS[@]}; do
     echo $IF

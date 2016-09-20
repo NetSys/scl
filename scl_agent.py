@@ -2,33 +2,51 @@
 
 import sys
 import logging
+import argparse
+import ConfigParser
+import json
 from conf.const import *
 from lib.selector import Selector
 from lib.timer import Timer
-import lib.agent_channel as channel
+from lib.socket_utils import byteify
+import lib.agent_channel as scl
 
+CONF_FILE = './conf/net.cfg'
+config = ConfigParser.ConfigParser()
+config.read(CONF_FILE)
+agent_list = byteify(json.loads(config.get('interfaces', 'agent_list')))
+proxy_list = byteify(json.loads(config.get('interfaces', 'proxy_list')))
 
-if len(sys.argv) is 3:
-    sw_id = sys.argv[1]
-    scl_agent_intf = sys.argv[2]
+sw_num = len(agent_list)
 
-#LOG_FILENAME = 'log/scl_agent_%s.log' % str(sw_id)
-LOG_FILENAME = None
-LEVEL = logging.DEBUG    # DEBUG shows the whole states
+parser = argparse.ArgumentParser(description='Agent of Simple Coordinator Layer (SCL)')
+parser.add_argument('sw_id', choices=range(0, sw_num), type=int, help='specify the switch id')
+parser.add_argument('channel', choices=['tcp', 'udp'], default='udp', help='specify the channel type')
+parser.add_argument('--log2file', action='store_true', help='store program log to file, dir is ./log/')
+parser.add_argument('--debug', action='store_true', help='enable debug mode')
+args = parser.parse_args()
+
+LOG_FN = 'log/scl_agent_%s.log' % str(args.sw_id) \
+        if args.log2file else None
+LEVEL = logging.DEBUG if args.debug else logging.INFO
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y%m%d %H:%M:%S', level=LEVEL, filename=LOG_FILENAME, filemode='w')
+    datefmt='%Y%m%d %H:%M:%S', level=LEVEL, filename=LOG_FN, filemode='w')
 logger = logging.getLogger(__name__)
 
-logger.debug('scl_agent_intf: %s' % scl_agent_intf)
-
 timer = Timer(logger)
-streams = channel.Streams(logger)
-scl2scl = channel.Scl2Scl(
-        scl_agent_mcast_grp, scl_agent_mcast_port, scl_agent_intf,
-        scl_proxy_mcast_grp, scl_proxy_mcast_port, timer, streams, logger)
-scl2sw = channel.Scl2Sw(scl_agent_serv_host, scl_agent_serv_port, streams, logger)
+streams = scl.Streams(logger)
 selector = Selector()
+scl2sw = scl.Scl2Sw(
+        local_ctrl_host, local_ctrl_port, streams, logger)
+if args.channel == 'udp':
+    scl2scl = scl.Scl2SclUdp(
+            streams, logger, agent_list[args.sw_id],
+            scl_agent_port, scl_proxy_port)
+else:
+    scl2scl = scl.Scl2SclTcp(
+            streams, logger, agent_list[args.sw_id],
+            proxy_list, scl_proxy_port, timer)
 
 timer.start()   # another thread, daemonize
 

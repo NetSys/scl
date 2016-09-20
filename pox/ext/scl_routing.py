@@ -8,6 +8,7 @@ from pox.lib.addresses import IPAddr
 
 log = core.getLogger()
 
+# NOTE: hard code, assume the switch name is sXXX type
 def dpid2name(dpid):
     return 's' + str(dpid).zfill(3)
 
@@ -28,21 +29,23 @@ def byteify(input):
 
 class Link(object):
     def __init__(
-            self, intf1, port1, intf2, port2,
+            self, sw1, intf1, sw2, intf2, port1=None, port2=None,
             state1=of.OFPPS_LINK_DOWN, state2=of.OFPPS_LINK_DOWN):
+        self.sw1 = sw1
         self.intf1 = intf1
         self.port1 = port1
         self.state1 = state1
-        self.sw1 = intf1.split('-')[0]
+        self.sw2 = sw2
         self.intf2 = intf2
         self.port2 = port2
-        self.sw2 = intf2.split('-')[0]
         self.state2 = state2
         # default host link state is up
         if self.sw1[0] == 'h':
             self.state1 = of.OFPPS_STP_FORWARD
+            self.port1 = 1
         if self.sw2[0] == 'h':
             self.state2 = of.OFPPS_STP_FORWARD
+            self.port2 = 1
 
 
 class scl_routing(object):
@@ -72,19 +75,23 @@ class scl_routing(object):
             self.topo = byteify(json.load(in_file))
             if self.topo:
                 for host in self.topo['hosts'].keys():
-                    if host not in self.topo['ctrls']:
-                        self.graph.add_node(host)
-                        self.hosts[host] = self.topo['hosts'][host]
+                    if 'ctrls' in self.topo and host in self.topo['ctrls']:
+                        continue
+                    self.graph.add_node(host)
+                    self.hosts[host] = self.topo['hosts'][host]
                 log.debug('total edge num: %d' % len(self.topo['links']))
-                for link in self.topo['links']:
-                    intf1, port1, intf2, port2 = link[0], link[1], link[2], link[3]
-                    sw1 = intf1.split('-')[0]
-                    sw2 = intf2.split('-')[0]
-                    link_obj = Link(intf1, port1, intf2, port2)
+                for l in self.topo['links']:
+                    if len(self.topo['links'][0]) == 6:
+                        sw1, intf1, port1, sw2, intf2, port2 = \
+                                l[0], l[1], l[2], l[3], l[4], l[5]
+                        link_obj = Link(sw1, intf1, sw2, intf2, port1, port2)
+                    elif len(self.topo['links'][0]) == 4:
+                        sw1, intf1, sw2, intf2 = l[0], l[1], l[2], l[3]
+                        link_obj = Link(sw1, intf1, sw2, intf2)
                     self.sw2link[sw1][sw2] = link_obj
-                    self.intf2link[intf1] = link_obj
+                    self.intf2link[sw1 + ':' + intf1] = link_obj
                     self.sw2link[sw2][sw1] = link_obj
-                    self.intf2link[intf2] = link_obj
+                    self.intf2link[sw2 + ':' + intf2] = link_obj
 
     def graph_add_edge(self, sw1, sw2):
         self.graph.add_edge(sw1, sw2, weight=1)
@@ -92,9 +99,9 @@ class scl_routing(object):
     def _handle_ConnectionUp(self, event):
         log.debug("Switch %s up.", dpid_to_str(event.dpid))
         sw_name = dpid2name(event.dpid)
-        if sw_name not in self.topo['switches']:
-            log.error('sw: %s not in topology' % sw_name)
-            return
+        #if sw_name not in self.topo['switches']:
+        #    log.error('sw: %s not in topology' % sw_name)
+        #    return
         if self.graph.has_node(sw_name):
             log.error('sw: %s is in current graph' % sw_name)
             return
@@ -121,20 +128,26 @@ class scl_routing(object):
         assert event.modified is True
         log.debug("Switch %s portstatus upcall.", dpid_to_str(event.dpid))
         log.debug("     port: %s, state: %d" % (event.ofp.desc.name, event.ofp.desc.state))
-        link = self.intf2link[event.ofp.desc.name]
+        link = self.intf2link[dpid2name(event.dpid) + ':' + event.ofp.desc.name]
+        if link is None:
+            return
+        if link.sw1 == dpid2name(event.dpid):
+            link.port1 = event.ofp.desc.port_no
+        else:
+            link.port2 = event.ofp.desc.port_no
         if not link:
             log.debug('control <---> data link intf')
             return
         sw1, sw2 = link.sw1, link.sw2
-        old_state = link.state1 if event.ofp.desc.name == link.intf1 else link.state2
+        old_state = link.state1 if dpid2name(event.dpid) == sw1 else link.state2
         if event.ofp.desc.state != of.OFPPS_LINK_DOWN:
             # we do not distinguish stp state types
             event.ofp.desc.state = of.OFPPS_STP_FORWARD
         if event.ofp.desc.state == old_state:
-            log.debug("intf %s state is already %d" % (event.ofp.desc.name, old_state))
+            log.debug("sw %s intf %s state is already %d, sw1: %s, sw2: %s, intf1: %s, intf2: %s, state1: %s, state2: %s" % (dpid2name(event.dpid), event.ofp.desc.name, old_state, sw1, sw2, link.intf1, link.intf2, link.state1, link.state2))
             return
         if event.ofp.desc.state != of.OFPPS_LINK_DOWN:
-            if event.ofp.desc.name == link.intf1:
+            if dpid2name(event.dpid) == sw1:
                 link.state1 = event.ofp.desc.state
                 if link.state2 != of.OFPPS_LINK_DOWN:
                     # both ends of the link are up, update route
@@ -155,7 +168,7 @@ class scl_routing(object):
                     log.debug('one end of the link is up, wait for the other end')
                     return
         else:
-            if event.ofp.desc.name == link.intf1:
+            if dpid2name(event.dpid) == sw1:
                 link.state1 = event.ofp.desc.state
                 if link.state2 != of.OFPPS_LINK_DOWN:
                     # an end of the link is down, update route
@@ -190,6 +203,7 @@ class scl_routing(object):
                 except nx.exception.NetworkXNoPath:
                     continue
                 path = paths[current % len(paths)]
+                # put hostpaths on all path candidates equally
                 current += 1
                 log.debug('calculated path: %s' % json.dumps(path))
                 path = zip(path, path[1:])
@@ -219,14 +233,14 @@ class scl_routing(object):
         nw_dst = self.hosts[host2]
         # types of sw_name and link.sw1 are different, use == not is
         if sw_name == link.sw1:
-            log.debug(
-                    'host1 %s --> host2 %s; link: %s %s %d --> %s %s %d' % (
-                        nw_src, nw_dst, link.sw1, link.intf1, link.port1, link.sw2, link.intf2, link.port2))
+            #log.debug(
+            #        'host1 %s --> host2 %s; link: %s %s %d --> %s %s %d' % (
+            #            nw_src, nw_dst, link.sw1, link.intf1, link.port1, link.sw2, link.intf2, link.port2))
             outport = link.port1
         else:
-            log.debug(
-                    'host1 %s --> host2 %s; link: %s %s %d --> %s %s %d' % (
-                        nw_src, nw_dst, link.sw2, link.intf2, link.port2, link.sw1, link.intf1, link.port1))
+            #log.debug(
+            #        'host1 %s --> host2 %s; link: %s %s %d --> %s %s %d' % (
+            #            nw_src, nw_dst, link.sw2, link.intf2, link.port2, link.sw1, link.intf1, link.port1))
             outport = link.port2
         msg = of.ofp_flow_mod(command = cmd)
         msg.match.dl_type = 0x800
@@ -241,16 +255,25 @@ class scl_routing(object):
         if not updates['modify'] and not updates['delete']:
             return
         log.debug("update flow tables")
+        total, modify, delete  = 0, 0, 0
 
         for sw_name, flow_entries in updates['modify'].iteritems():
-            log.debug('modify sw flow_entries: %s' % sw_name)
+            modify = 0
             for host1, host2, link in flow_entries:
+                modify += 1
                 self.update_flow_entry(sw_name, host1, host2, link, of.OFPFC_MODIFY)
+            log.debug('modify sw flow_entries: %s, size %d' % (sw_name, modify))
+            total += modify
 
         for sw_name, flow_entries in updates['delete'].iteritems():
-            log.debug('delete sw flow_entries: %s' % sw_name)
+            delete = 0
             for host1, host2, link in flow_entries:
+                delete += 1
                 self.update_flow_entry(sw_name, host1, host2, link, of.OFPFC_DELETE)
+            log.debug('delete sw flow_entries: %s, size %d' % (sw_name, delete))
+            total += delete
+
+        log.debug('total changed flow_entries size %d' % total)
 
 
 def launch(name=None):
