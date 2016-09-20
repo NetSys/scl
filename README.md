@@ -1,81 +1,36 @@
-## emulation using mininet
+## SCL (Simple Coordination Layer)
 
-first put controller codes in the scl directory, like scl/pox/
+SCL composes of SCL-agent running at each switch and SCL-proxy running at each single-image controller like POX.
 
-to avoid the controller flushes the flow entries on switches, comment related codes in the controller
-for example, pox/pox/openflow/of_01.py
+## Running SCL in Machines
+
+SCL-agent: copy `conf/` `lib/` `log/` and `scl_agent.py` to the destination environment.
+
 ``` Bash
+./scl_agent.py <id> udp
+```
+
+SCL-proxy: copy `conf/` `lib/` `log` and `scl_proxy.py` to the destination environment.
+
+``` Bash
+./scl_proxy.py <id> udp
+```
+
+Controller: two applications, shortest path routing and traffic engineering, are implemented on top of POX. To avoid POX flushes the flow entries on switches, comment the following codes.
+``` Bash
+# file: pox/pox/openflow/of_01.py
 148 # if con.ofnexus.clear_flows_on_connect:
 149 #   con.send(of.ofp_flow_mod(match=of.ofp_match(), command=of.OFPFC_DELETE))
 ```
 
-start emulation
-``` Bash
-./run.py
-```
+Configuration: IP addresses of SCL-agents and SCL-proxies are specified in `conf/net.cfg`. Change these addresses according to the local network configuration. Default UDP broadcast address and controller listening address are specified in `conf/const.py`. To run the POX application, a topology configuration file in needed, or enable LLDP module instead.
 
-## scl test topology
+Addtion: some scripts in `cloudlab` directory for configuring and running SCL remotely and a shortest path routing application implemented on top of ONOS in `onos` directory.
 
-        +-------------------+       +-------------------+
-        |    +---------+    |       |    +---------+    |
-        |    |  pox1   |    |       |    |  pox2   |    |
-        |    +---------+    |       |    +---------+    |
-        |       |   |       |       |       |   |       |
-        |VM1   of  of       |       |VM2   of  of       |
-        |       |   |       |       |       |   |       |
-        |    +---------+    |       |    +---------+    |
-        |    |sclproxy |    |       |    |sclproxy |    |
-        |    +---------+    |       |    +---------+    |
-        |         |         |       |         |         |
-        +---------|---------+       +---------|---------+
-                          udp broadcast
-        +---------|---------------------------|---------+
-        |         |                           |         |
-        |    +---------+                 +---------+    |
-        |    |sclagent |                 |sclagent |    |
-        |    +---------+                 +---------+    |
-        |        |of                         |of        |
-        |    +---------+                 +---------+    |
-        |    |   sw1   |s1-eth2---s2-eth2|   sw2   |    |
-        |    +---------+                 +---------+    |
-        |      s1-eth1                     s2-eth1      |
-        |VM3      |                           |         |
-        |      +-----+                     +-----+      |
-        |      | h1  |                     | h2  |      |
-        |      +-----+                     +-----+      |
-        +-----------------------------------------------+
+## Running SCL in Mininet
 
-## run scl routine
-
-set up 3 VMs, pox and scl_proxy in VM1 VM2, scl_agents in VM3. Put lib/ and scl_proxy.py in VM1 and VM2. Put lib/ scl_agent.py in VM3.
-
-edit scl address and controller address in const.py
+SCL can be tested in Mininet with a Fat-tree inbound/outband topology locally. Install Mininet and download POX into `pox/` directory first.
 
 ``` Bash
-scl_proxy_intf = '192.168.1.1'      # on VM1
-scl_proxy_intf = '192.168.1.2'      # on VM2
-scl_agent_serv_port = 6633         # on VM3 for scl_agent of sw1
-scl_agent_serv_port = 6634         # on VM3 for scl_agent of sw2
-```
-
-run scl_agent.py and scl_proxy.py in VMs
-
-``` Bash
-./scl_agent.py   # on VM3
-./scl_proxy.py   # on VM1 or VM2
-```
-
-run a controller function, pox as an example
-
-``` Bash
-./pox.py log.level --DEBUG forwarding.l2_learning   # on VM1 or VM2
-```
-
-set up a network on VM3
-
-scl_proxy will show the change of link state.
-
-``` Bash
-sudo ip link set s1-eth2 down   # on VM3
-sudo ip link set s1-eth2 up     # on VM3
+cd mininet && sudo ./run.py udp fattree_inband shortest
 ```
